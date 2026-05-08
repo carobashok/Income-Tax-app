@@ -243,10 +243,21 @@ def extract_tds_tables(pdf, format_version: str) -> tuple:
     return deductors, []
 
 def extract_self_tax(pdf, format_version: str) -> list:
-    """Extract Part C (OLD) self-assessment / advance tax payments."""
+    """
+    Extract Part C / Part VII self-assessment / advance tax payments.
+    Column order in TRACES: Sr | Major | Minor | Tax | Surcharge | Ed.Cess |
+                             Penalty | Interest | Others | Total | BSR | Date | Challan | Remarks
+    Strategy: anchor on major_head position, extract fixed offsets rightward.
+    Only process rows that have a valid deposit date (filters out glossary rows).
+    """
     results = []
     MINOR_HEADS = {"100", "102", "106", "107", "300", "400", "800", "200"}
     MAJOR_HEADS = {"0020", "0021", "0023", "0024", "0026", "0028", "0031", "0032", "0033"}
+    DATE_RE     = re.compile(r'\d{1,2}-[A-Za-z]{3}-\d{4}')
+
+    def is_decimal(val):
+        clean = val.replace(",", "").strip()
+        return bool(re.match(r'^\d+\.\d{2}$', clean))
 
     for page in pdf.pages:
         tables = page.extract_tables()
@@ -255,33 +266,53 @@ def extract_self_tax(pdf, format_version: str) -> list:
                 continue
             for row in table:
                 row = [str(c).strip() if c else "" for c in row]
-                major = next((c for c in row if c in MAJOR_HEADS), None)
-                minor = next((c for c in row if c in MINOR_HEADS), None)
-                if major and minor:
-                    amounts = []
-                    for cell in row:
-                        clean = cell.replace(",", "").strip()
-                        if re.match(r'^\d+\.?\d*$', clean) and float(clean) > 0:
-                            amounts.append(parse_amount(cell))
-                    dates = re.findall(r'\d{1,2}-\w{3}-\d{4}', " ".join(row))
-                    bsr   = next((c for c in row if re.match(r'^\d{7}$', c)), None)
-                    challan = next((c for c in row if re.match(r'^\d{4,6}$', c) and c != bsr), None)
 
-                    results.append({
-                        "major_head":      major,
-                        "minor_head":      minor,
-                        "tax":             amounts[0] if len(amounts) > 0 else 0,
-                        "surcharge":       amounts[1] if len(amounts) > 1 else 0,
-                        "education_cess":  amounts[2] if len(amounts) > 2 else 0,
-                        "penalty":         amounts[3] if len(amounts) > 3 else 0,
-                        "interest":        amounts[4] if len(amounts) > 4 else 0,
-                        "others":          amounts[5] if len(amounts) > 5 else 0,
-                        "total_tax":       amounts[6] if len(amounts) > 6 else 0,
-                        "bsr_code":        bsr or "",
-                        "date_of_deposit": dates[0] if dates else None,
-                        "challan_serial":  challan or "",
-                        "remarks":         "",
-                    })
+                # Must have both major and minor head
+                major_idx = next((i for i, c in enumerate(row) if c in MAJOR_HEADS), None)
+                if major_idx is None:
+                    continue
+                major = row[major_idx]
+                minor = next((c for c in row if c in MINOR_HEADS), None)
+                if not minor:
+                    continue
+
+                # Must have a deposit date — filters out glossary/reference rows
+                dates = DATE_RE.findall(" ".join(row))
+                if not dates:
+                    continue
+
+                # Extract only decimal amounts (Tax, Surcharge, Ed.Cess, Penalty,
+                # Interest, Others, Total) — these all end in .00
+                decimal_amounts = [parse_amount(c) for c in row if is_decimal(c)]
+
+                # BSR code: 7-digit number
+                bsr = next((c for c in row if re.match(r'^\d{7}$', c.replace(",",""))), None)
+
+                # Challan: 4-6 digit number, not BSR, not major head, not minor head
+                challan = next(
+                    (c for c in row if re.match(r'^\d{4,6}$', c)
+                     and c != bsr
+                     and c not in MAJOR_HEADS
+                     and c not in MINOR_HEADS
+                     and not DATE_RE.match(c)),
+                    None
+                )
+
+                results.append({
+                    "major_head":      major,
+                    "minor_head":      minor,
+                    "tax":             decimal_amounts[0] if len(decimal_amounts) > 0 else 0,
+                    "surcharge":       decimal_amounts[1] if len(decimal_amounts) > 1 else 0,
+                    "education_cess":  decimal_amounts[2] if len(decimal_amounts) > 2 else 0,
+                    "penalty":         decimal_amounts[3] if len(decimal_amounts) > 3 else 0,
+                    "interest":        decimal_amounts[4] if len(decimal_amounts) > 4 else 0,
+                    "others":          decimal_amounts[5] if len(decimal_amounts) > 5 else 0,
+                    "total_tax":       decimal_amounts[6] if len(decimal_amounts) > 6 else 0,
+                    "bsr_code":        bsr or "",
+                    "date_of_deposit": dates[0] if dates else None,
+                    "challan_serial":  challan or "",
+                    "remarks":         "",
+                })
     return results
 
 def parse_pdf(uploaded_file) -> dict:
