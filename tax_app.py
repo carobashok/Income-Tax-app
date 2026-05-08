@@ -2,88 +2,50 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 import re
-from datetime import datetime
+import io
 from supabase import create_client, Client
-import os
 
-# ── Page config ──────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Taxalytics",
-    page_icon="📊",
-    layout="wide"
-)
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Taxalytics", page_icon="📊", layout="wide")
 
 # ── Styling ───────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'IBM Plex Sans', sans-serif;
-}
-h1, h2, h3 {
-    font-family: 'IBM Plex Mono', monospace;
-}
+html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
+h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; }
 .stApp { background-color: #F7F6F1; }
 
 .header-bar {
-    background: #1A1A2E;
-    color: #E8E0D0;
-    padding: 1.2rem 2rem;
-    border-radius: 8px;
-    margin-bottom: 1.5rem;
-    display: flex;
-    align-items: center;
-    gap: 1rem;
+    background: #1A1A2E; color: #E8E0D0;
+    padding: 1.2rem 2rem; border-radius: 8px; margin-bottom: 1.5rem;
 }
 .header-bar h1 { color: #F5C842; margin: 0; font-size: 1.4rem; }
 .header-bar p  { color: #A0A8C0; margin: 0; font-size: 0.85rem; }
 
 .card {
-    background: #FFFFFF;
-    border: 1px solid #E0DDD5;
-    border-radius: 8px;
-    padding: 1.2rem 1.5rem;
-    margin-bottom: 1rem;
+    background: #FFFFFF; border: 1px solid #E0DDD5;
+    border-radius: 8px; padding: 1.2rem 1.5rem; margin-bottom: 1rem;
 }
 .card-title {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.8rem;
-    color: #888;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    margin-bottom: 0.5rem;
+    font-family: 'IBM Plex Mono', monospace; font-size: 0.8rem;
+    color: #888; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.5rem;
 }
-.badge {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: 20px;
-    font-size: 0.75rem;
-    font-weight: 600;
-}
-.badge-new  { background: #D4EDDA; color: #155724; }
-.badge-old  { background: #FFF3CD; color: #856404; }
-.badge-ok   { background: #CCE5FF; color: #004085; }
-
-.summary-row {
-    display: flex;
-    gap: 1rem;
-    margin-bottom: 1rem;
-}
+.summary-row { display: flex; gap: 1rem; margin-bottom: 1rem; }
 .summary-card {
-    flex: 1;
-    background: #1A1A2E;
-    color: #E8E0D0;
-    border-radius: 8px;
-    padding: 1rem;
-    text-align: center;
+    flex: 1; background: #1A1A2E; color: #E8E0D0;
+    border-radius: 8px; padding: 1rem; text-align: center;
 }
 .summary-card .label { font-size: 0.75rem; color: #A0A8C0; }
-.summary-card .value { font-size: 1.3rem; font-weight: 600; color: #F5C842; font-family: 'IBM Plex Mono', monospace; }
+.summary-card .value { font-size: 1.3rem; font-weight: 600; color: #F5C842;
+    font-family: 'IBM Plex Mono', monospace; }
+
+/* Summary table styling */
+.stDataFrame { border-radius: 8px; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Supabase connection ───────────────────────────────────────────────────────
+# ── Supabase ──────────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_supabase() -> Client:
     url = st.secrets["supabase"]["url"]
@@ -92,46 +54,96 @@ def get_supabase() -> Client:
 
 supabase = get_supabase()
 
-# ── Helper: fetch clients ─────────────────────────────────────────────────────
+# ── DB helpers ────────────────────────────────────────────────────────────────
 def fetch_clients():
-    res = supabase.table("clients").select("*").order("name").execute()
-    return res.data or []
+    return supabase.table("clients").select("*").order("name").execute().data or []
 
-# ── Helper: insert client ─────────────────────────────────────────────────────
 def insert_client(pan: str, name: str) -> int:
-    res = supabase.table("clients").insert({"pan": pan.upper(), "name": name}).execute()
-    return res.data[0]["id"]
+    return supabase.table("clients").insert({"pan": pan.upper(), "name": name}).execute().data[0]["id"]
 
-# ── Helper: check duplicate AY ────────────────────────────────────────────────
 def ay_exists(client_id: int, assessment_year: str) -> bool:
     res = (supabase.table("form26as_header")
-           .select("id")
-           .eq("client_id", client_id)
-           .eq("assessment_year", assessment_year)
-           .execute())
+           .select("id").eq("client_id", client_id)
+           .eq("assessment_year", assessment_year).execute())
     return len(res.data) > 0
+
+# ── Summary query ─────────────────────────────────────────────────────────────
+def fetch_summary(client_id: int) -> pd.DataFrame:
+    """
+    Pull all years for a client and aggregate into one summary row per AY.
+    """
+    # Headers
+    headers = (supabase.table("form26as_header")
+               .select("id, assessment_year, financial_year")
+               .eq("client_id", client_id)
+               .order("assessment_year")
+               .execute().data or [])
+
+    if not headers:
+        return pd.DataFrame()
+
+    rows = []
+    for h in headers:
+        hid = h["id"]
+        ay  = h["assessment_year"]
+        fy  = h["financial_year"]
+
+        # Deductors for this AY
+        deductors = (supabase.table("form26as_tds_deductor")
+                     .select("deductor_name, total_amount_credited, total_tds_deposited")
+                     .eq("header_id", hid)
+                     .execute().data or [])
+
+        gross_income  = sum(d["total_amount_credited"] or 0 for d in deductors)
+        total_tds     = sum(d["total_tds_deposited"]   or 0 for d in deductors)
+        employers     = ", ".join(set(d["deductor_name"] for d in deductors if d["deductor_name"]))
+
+        # Self tax for this AY — split by minor head
+        self_tax = (supabase.table("form26as_self_tax")
+                    .select("minor_head, total_tax")
+                    .eq("header_id", hid)
+                    .execute().data or [])
+
+        advance_tax     = sum(s["total_tax"] or 0 for s in self_tax if s["minor_head"] == "100")
+        self_assess_tax = sum(s["total_tax"] or 0 for s in self_tax if s["minor_head"] == "300")
+        regular_tax     = sum(s["total_tax"] or 0 for s in self_tax if s["minor_head"] == "400")
+
+        total_tax = total_tds + advance_tax + self_assess_tax + regular_tax
+        eff_rate  = round((total_tds / gross_income) * 100, 1) if gross_income > 0 else 0
+
+        rows.append({
+            "AY":                   ay,
+            "FY":                   fy,
+            "Employer(s)":          employers,
+            "Gross Income (₹)":     gross_income,
+            "TDS Deducted (₹)":     total_tds,
+            "Advance Tax (₹)":      advance_tax,
+            "Self-Assess Tax (₹)":  self_assess_tax,
+            "Regular Assess (₹)":   regular_tax,
+            "Total Tax Paid (₹)":   total_tax,
+            "Eff. TDS Rate (%)":    eff_rate,
+        })
+
+    return pd.DataFrame(rows)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PARSER
 # ══════════════════════════════════════════════════════════════════════════════
 
 def detect_format(text: str) -> str:
-    """Detect OLD (pre-2021) vs NEW format based on part labels in PDF text."""
     if "PART-I" in text or "PART I" in text or "Part-I" in text:
         return "NEW"
     if "PART A" in text or "Part A" in text:
         return "OLD"
-    return "NEW"  # default to new
+    return "NEW"
 
 def extract_header(text: str) -> dict:
-    """Extract PAN, name, financial year, assessment year."""
-    pan   = re.search(r'PAN[)\s]*([A-Z]{5}[0-9]{4}[A-Z])', text)
-    fy    = re.search(r'Financial Year[:\s]+(\d{4}-\d{2,4})', text)
-    ay    = re.search(r'Assessment Year[:\s]+(\d{4}-\d{2,4})', text)
-    name  = re.search(r'Name of Assessee\s+([A-Z ]+)', text)
-    addr  = re.search(r'Address of Assessee\s+(.+?)(?=Above data|$)', text, re.DOTALL)
+    pan     = re.search(r'PAN[)\s]*([A-Z]{5}[0-9]{4}[A-Z])', text)
+    fy      = re.search(r'Financial Year[:\s]+(\d{4}-\d{2,4})', text)
+    ay      = re.search(r'Assessment Year[:\s]+(\d{4}-\d{2,4})', text)
+    name    = re.search(r'Name of Assessee\s+([A-Z ]+)', text)
+    addr    = re.search(r'Address of Assessee\s+(.+?)(?=Above data|$)', text, re.DOTALL)
     updated = re.search(r'Data updated till\s+(\d{1,2}-\w{3}-\d{4})', text)
-
     return {
         "pan":             pan.group(1).strip()  if pan     else "",
         "financial_year":  fy.group(1).strip()   if fy      else "",
@@ -142,35 +154,25 @@ def extract_header(text: str) -> dict:
     }
 
 def parse_amount(val) -> float:
-    """Safely parse numeric strings."""
-    if val is None:
-        return 0.0
-    try:
-        return float(str(val).replace(",", "").strip())
-    except:
-        return 0.0
+    if val is None: return 0.0
+    try: return float(str(val).replace(",", "").strip())
+    except: return 0.0
 
-def extract_tds_tables(pdf, format_version: str) -> tuple:
-    """
-    Extract deductor summaries and transaction rows from TDS parts.
-    Uses column-position-based extraction for reliability.
-    Returns (deductors_list, transactions_list)
-    """
+def extract_tds_tables(pdf, format_version: str) -> list:
     deductors = []
-
-    TAN_PATTERN = re.compile(r'^[A-Z]{4}\d{5}[A-Z]$')
+    TAN_PATTERN  = re.compile(r'^[A-Z]{4}\d{5}[A-Z]$')
     SECTION_CODES = {
-        "192", "192A", "193", "194", "194A", "194B", "194BA", "194C",
-        "194D", "194H", "194I", "194IA", "194IB", "194IC", "194J",
-        "194J(a)", "194J(b)", "194LA", "194M", "194N", "194O",
-        "194Q", "194R", "194S", "195"
+        "192","192A","193","194","194A","194B","194BA","194C",
+        "194D","194H","194I","194IA","194IB","194IC","194J",
+        "194J(a)","194J(b)","194LA","194M","194N","194O",
+        "194Q","194R","194S","195"
     }
-    DATE_RE   = re.compile(r'\d{1,2}-[A-Za-z]{3}-\d{4}')
-    AMOUNT_RE = re.compile(r'^\d{1,3}(,\d{3})*\.\d{2}$|^\d{4,}\.\d{2}$')
+    DATE_RE = re.compile(r'\d{1,2}-[A-Za-z]{3}-\d{4}')
 
     def is_amount(val):
         clean = val.replace(",", "").strip()
-        return bool(re.match(r'^\d+\.\d{2}$', clean)) and float(clean) >= 0
+        try: return bool(re.match(r'^\d+\.\d{2}$', clean)) and float(clean) >= 0
+        except: return False
 
     def get_amounts(cells):
         return [parse_amount(c) for c in cells if is_amount(c)]
@@ -178,213 +180,138 @@ def extract_tds_tables(pdf, format_version: str) -> tuple:
     current_deductor = None
 
     for page in pdf.pages:
-        tables = page.extract_tables()
-        for table in tables:
-            if not table:
-                continue
+        for table in (page.extract_tables() or []):
             for row in table:
                 row = [str(c).strip() if c else "" for c in row]
 
-                # ── Deductor summary row: identified by TAN pattern ──────────
+                # Deductor summary row
                 tan_idx = next((i for i, c in enumerate(row) if TAN_PATTERN.match(c)), None)
                 if tan_idx is not None:
                     tan = row[tan_idx]
-                    # Name = longest text cell before TAN, not a number
-                    name_cells = [
-                        c for c in row[:tan_idx]
-                        if len(c) > 5 and not c.replace(".", "").replace(",", "").isdigit()
-                    ]
-                    dname = max(name_cells, key=len) if name_cells else ""
-
-                    # Amounts are the 3 cells immediately after TAN (Amount, Tax, Deposited)
-                    after_tan = [c for c in row[tan_idx + 1:] if c and c != "-"]
-                    amounts = get_amounts(after_tan)
-
+                    name_cells = [c for c in row[:tan_idx]
+                                  if len(c) > 5 and not c.replace(".", "").replace(",", "").isdigit()]
+                    dname   = max(name_cells, key=len) if name_cells else ""
+                    amounts = get_amounts([c for c in row[tan_idx+1:] if c and c != "-"])
                     current_deductor = {
-                        "deductor_name":        dname,
-                        "tan":                  tan,
-                        "total_amount_credited": amounts[0] if len(amounts) > 0 else 0,
-                        "total_tax_deducted":    amounts[1] if len(amounts) > 1 else 0,
-                        "total_tds_deposited":   amounts[2] if len(amounts) > 2 else 0,
-                        "part_label":            "I" if format_version == "NEW" else "A",
-                        "_transactions":         []
+                        "deductor_name":         dname,
+                        "tan":                   tan,
+                        "total_amount_credited":  amounts[0] if len(amounts) > 0 else 0,
+                        "total_tax_deducted":     amounts[1] if len(amounts) > 1 else 0,
+                        "total_tds_deposited":    amounts[2] if len(amounts) > 2 else 0,
+                        "part_label":             "I" if format_version == "NEW" else "A",
+                        "_transactions":          []
                     }
                     deductors.append(current_deductor)
                     continue
 
-                # ── Transaction row: identified by section code ───────────────
+                # Transaction row
                 if current_deductor:
                     section = next((c for c in row if c in SECTION_CODES), None)
                     if section:
-                        dates   = DATE_RE.findall(" ".join(row))
+                        dates  = DATE_RE.findall(" ".join(row))
+                        if not dates: continue   # skip glossary rows
                         amounts = get_amounts(row)
-
-                        # Booking status: single letter F/U/P/O/M/Z in its own cell
-                        status = next(
-                            (c for c in row if c in {"F", "U", "P", "O", "M", "Z"}), ""
-                        )
-
-                        # Skip glossary/reference rows — real transactions must have a date
-                        if not dates:
-                            continue
-
-                        txn = {
+                        status  = next((c for c in row if c in {"F","U","P","O","M","Z"}), "")
+                        current_deductor["_transactions"].append({
                             "section_code":     section,
-                            "transaction_date": dates[0] if len(dates) > 0 else None,
+                            "transaction_date": dates[0],
                             "booking_status":   status,
                             "date_of_booking":  dates[1] if len(dates) > 1 else None,
                             "remarks":          "",
                             "amount_paid":      amounts[0] if len(amounts) > 0 else 0,
                             "tax_deducted":     amounts[1] if len(amounts) > 1 else 0,
                             "tds_deposited":    amounts[2] if len(amounts) > 2 else 0,
-                        }
-                        current_deductor["_transactions"].append(txn)
-
-    return deductors, []
+                        })
+    return deductors
 
 def extract_self_tax(pdf, format_version: str) -> list:
-    """
-    Extract Part C / Part VII self-assessment / advance tax payments.
-    Column order in TRACES: Sr | Major | Minor | Tax | Surcharge | Ed.Cess |
-                             Penalty | Interest | Others | Total | BSR | Date | Challan | Remarks
-    Strategy: anchor on major_head position, extract fixed offsets rightward.
-    Only process rows that have a valid deposit date (filters out glossary rows).
-    """
     results = []
-    MINOR_HEADS = {"100", "102", "106", "107", "300", "400", "800", "200"}
-    MAJOR_HEADS = {"0020", "0021", "0023", "0024", "0026", "0028", "0031", "0032", "0033"}
-    DATE_RE     = re.compile(r'\d{1,2}-[A-Za-z]{3}-\d{4}')
+    MINOR_HEADS = {"100","102","106","107","300","400","800","200"}
+    MAJOR_HEADS = {"0020","0021","0023","0024","0026","0028","0031","0032","0033"}
+    DATE_RE = re.compile(r'\d{1,2}-[A-Za-z]{3}-\d{4}')
 
     def is_decimal(val):
         clean = val.replace(",", "").strip()
         return bool(re.match(r'^\d+\.\d{2}$', clean))
 
     for page in pdf.pages:
-        tables = page.extract_tables()
-        for table in tables:
-            if not table:
-                continue
+        for table in (page.extract_tables() or []):
             for row in table:
                 row = [str(c).strip() if c else "" for c in row]
-
-                # Must have both major and minor head
                 major_idx = next((i for i, c in enumerate(row) if c in MAJOR_HEADS), None)
-                if major_idx is None:
-                    continue
+                if major_idx is None: continue
                 major = row[major_idx]
                 minor = next((c for c in row if c in MINOR_HEADS), None)
-                if not minor:
-                    continue
-
-                # Must have a deposit date — filters out glossary/reference rows
+                if not minor: continue
                 dates = DATE_RE.findall(" ".join(row))
-                if not dates:
-                    continue
-
-                # Extract only decimal amounts (Tax, Surcharge, Ed.Cess, Penalty,
-                # Interest, Others, Total) — these all end in .00
-                decimal_amounts = [parse_amount(c) for c in row if is_decimal(c)]
-
-                # BSR code: 7-digit number
-                bsr = next((c for c in row if re.match(r'^\d{7}$', c.replace(",",""))), None)
-
-                # Challan: 4-6 digit number, not BSR, not major head, not minor head
+                if not dates: continue   # skip glossary rows
+                decimals = [parse_amount(c) for c in row if is_decimal(c)]
+                bsr     = next((c for c in row if re.match(r'^\d{7}$', c.replace(",", ""))), None)
                 challan = next(
                     (c for c in row if re.match(r'^\d{4,6}$', c)
-                     and c != bsr
-                     and c not in MAJOR_HEADS
-                     and c not in MINOR_HEADS
-                     and not DATE_RE.match(c)),
-                    None
-                )
-
+                     and c != bsr and c not in MAJOR_HEADS
+                     and c not in MINOR_HEADS and not DATE_RE.match(c)), None)
                 results.append({
                     "major_head":      major,
                     "minor_head":      minor,
-                    "tax":             decimal_amounts[0] if len(decimal_amounts) > 0 else 0,
-                    "surcharge":       decimal_amounts[1] if len(decimal_amounts) > 1 else 0,
-                    "education_cess":  decimal_amounts[2] if len(decimal_amounts) > 2 else 0,
-                    "penalty":         decimal_amounts[3] if len(decimal_amounts) > 3 else 0,
-                    "interest":        decimal_amounts[4] if len(decimal_amounts) > 4 else 0,
-                    "others":          decimal_amounts[5] if len(decimal_amounts) > 5 else 0,
-                    "total_tax":       decimal_amounts[6] if len(decimal_amounts) > 6 else 0,
+                    "tax":             decimals[0] if len(decimals) > 0 else 0,
+                    "surcharge":       decimals[1] if len(decimals) > 1 else 0,
+                    "education_cess":  decimals[2] if len(decimals) > 2 else 0,
+                    "penalty":         decimals[3] if len(decimals) > 3 else 0,
+                    "interest":        decimals[4] if len(decimals) > 4 else 0,
+                    "others":          decimals[5] if len(decimals) > 5 else 0,
+                    "total_tax":       decimals[6] if len(decimals) > 6 else 0,
                     "bsr_code":        bsr or "",
-                    "date_of_deposit": dates[0] if dates else None,
+                    "date_of_deposit": dates[0],
                     "challan_serial":  challan or "",
                     "remarks":         "",
                 })
     return results
 
 def parse_pdf(uploaded_file) -> dict:
-    """Master parse function. Returns structured dict of all extracted data."""
     with pdfplumber.open(uploaded_file) as pdf:
         full_text = "\n".join(p.extract_text() or "" for p in pdf.pages)
         fmt       = detect_format(full_text)
         header    = extract_header(full_text)
-        deductors, _ = extract_tds_tables(pdf, fmt)
+        deductors = extract_tds_tables(pdf, fmt)
         self_tax  = extract_self_tax(pdf, fmt)
+    return {"format_version": fmt, "header": header,
+            "deductors": deductors, "self_tax": self_tax}
 
-    return {
-        "format_version": fmt,
-        "header":         header,
-        "deductors":      deductors,
-        "self_tax":       self_tax,
-    }
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DB INSERT
-# ══════════════════════════════════════════════════════════════════════════════
-
+# ── DB insert ─────────────────────────────────────────────────────────────────
 def save_to_db(client_id: int, parsed: dict) -> dict:
-    h = parsed["header"]
+    h   = parsed["header"]
     fmt = parsed["format_version"]
-
-    # 1. Insert header
-    header_row = {
-        "pan":             h["pan"],
-        "assessee_name":   h["assessee_name"],
-        "address":         h["address"],
-        "financial_year":  h["financial_year"],
+    hres = supabase.table("form26as_header").insert({
+        "pan": h["pan"], "assessee_name": h["assessee_name"],
+        "address": h["address"], "financial_year": h["financial_year"],
         "assessment_year": h["assessment_year"],
         "data_updated_on": h["data_updated_on"],
-        "format_version":  fmt,
-        "client_id":       client_id,
-    }
-    hres = supabase.table("form26as_header").insert(header_row).execute()
+        "format_version": fmt, "client_id": client_id,
+    }).execute()
     header_id = hres.data[0]["id"]
 
-    deductor_count = 0
-    txn_count = 0
-
-    # 2. Insert deductors + transactions
+    deductor_count = txn_count = 0
     for d in parsed["deductors"]:
         txns = d.pop("_transactions", [])
         d["header_id"] = header_id
         dres = supabase.table("form26as_tds_deductor").insert(d).execute()
         deductor_id = dres.data[0]["id"]
         deductor_count += 1
-
         for t in txns:
             t["deductor_id"] = deductor_id
             supabase.table("form26as_tds_transactions").insert(t).execute()
             txn_count += 1
+    for st_row in parsed["self_tax"]:
+        st_row["header_id"] = header_id
+        supabase.table("form26as_self_tax").insert(st_row).execute()
 
-    # 3. Insert self tax
-    for st in parsed["self_tax"]:
-        st["header_id"] = header_id
-        supabase.table("form26as_self_tax").insert(st).execute()
-
-    return {
-        "header_id":       header_id,
-        "deductor_count":  deductor_count,
-        "txn_count":       txn_count,
-        "self_tax_count":  len(parsed["self_tax"]),
-    }
+    return {"header_id": header_id, "deductor_count": deductor_count,
+            "txn_count": txn_count, "self_tax_count": len(parsed["self_tax"])}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# UI
+# HEADER
 # ══════════════════════════════════════════════════════════════════════════════
-
 st.markdown("""
 <div class="header-bar">
     <div>
@@ -394,149 +321,244 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Sidebar: Client selection ─────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 👤 Client / PAN")
-    clients = fetch_clients()
+    clients        = fetch_clients()
     client_options = {f"{c['name']} — {c['pan']}": c for c in clients}
-
-    mode = st.radio("", ["Select existing PAN", "Add new PAN"], label_visibility="collapsed")
-
+    mode           = st.radio("", ["Select existing PAN", "Add new PAN"],
+                              label_visibility="collapsed")
     selected_client = None
 
     if mode == "Select existing PAN":
         if client_options:
-            choice = st.selectbox("Select client", list(client_options.keys()))
+            choice          = st.selectbox("Select client", list(client_options.keys()))
             selected_client = client_options[choice]
             st.success(f"PAN: `{selected_client['pan']}`")
         else:
             st.warning("No clients yet. Add one first.")
-
     else:
         new_pan  = st.text_input("PAN", max_chars=10, placeholder="ABCDE1234F").upper()
         new_name = st.text_input("Full Name", placeholder="As per PAN card")
         if st.button("➕ Add Client", use_container_width=True):
             if len(new_pan) == 10 and new_name:
                 try:
-                    new_id = insert_client(new_pan, new_name)
-                    st.success(f"Added! ID: {new_id}")
+                    insert_client(new_pan, new_name)
+                    st.success("Added!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error: {e}")
             else:
                 st.warning("Enter valid PAN (10 chars) and name.")
 
-# ── Main: Upload + Parse ──────────────────────────────────────────────────────
-col1, col2 = st.columns([1.2, 1])
+    st.markdown("---")
+    st.markdown("### 🗂 Navigation")
+    page = st.radio("", ["📤 Upload 26AS", "📋 Year-wise Summary"],
+                    label_visibility="collapsed")
 
-with col1:
-    st.markdown('<div class="card"><div class="card-title">Upload Form 26AS PDF</div>', unsafe_allow_html=True)
-    uploaded = st.file_uploader("", type=["pdf"], label_visibility="collapsed")
-    st.markdown('</div>', unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 1 — UPLOAD
+# ══════════════════════════════════════════════════════════════════════════════
+if page == "📤 Upload 26AS":
 
-with col2:
-    st.markdown('<div class="card"><div class="card-title">Instructions</div>', unsafe_allow_html=True)
-    st.markdown("""
+    col1, col2 = st.columns([1.2, 1])
+    with col1:
+        st.markdown('<div class="card"><div class="card-title">Upload Form 26AS PDF</div>',
+                    unsafe_allow_html=True)
+        uploaded = st.file_uploader("", type=["pdf"], label_visibility="collapsed")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with col2:
+        st.markdown('<div class="card"><div class="card-title">Instructions</div>',
+                    unsafe_allow_html=True)
+        st.markdown("""
 - Download Form 26AS from **TRACES portal**
 - Select or add the PAN from the sidebar
 - Upload the PDF — parser handles old & new formats
 - Review extracted data before saving
-    """)
-    st.markdown('</div>', unsafe_allow_html=True)
+        """)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-if uploaded and selected_client:
-    with st.spinner("Parsing PDF..."):
-        try:
-            parsed = parse_pdf(uploaded)
-        except Exception as e:
-            st.error(f"Parse error: {e}")
+    if uploaded and selected_client:
+        with st.spinner("Parsing PDF..."):
+            try:
+                parsed = parse_pdf(uploaded)
+            except Exception as e:
+                st.error(f"Parse error: {e}")
+                st.stop()
+
+        h   = parsed["header"]
+        fmt = parsed["format_version"]
+
+        st.markdown("---")
+        st.markdown("#### 🔍 Extracted Data Preview")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("PAN",             h["pan"])
+        c2.metric("Financial Year",  h["financial_year"])
+        c3.metric("Assessment Year", h["assessment_year"])
+        c4.metric("Format",          fmt)
+
+        if h["pan"] and h["pan"] != selected_client["pan"]:
+            st.warning(f"⚠️ PAN in PDF ({h['pan']}) ≠ selected client ({selected_client['pan']}). Please verify.")
+
+        if ay_exists(selected_client["id"], h["assessment_year"]):
+            st.error(f"❌ AY {h['assessment_year']} already exists for this PAN. Delete before re-uploading.")
             st.stop()
 
-    h   = parsed["header"]
-    fmt = parsed["format_version"]
+        if parsed["deductors"]:
+            st.markdown("**TDS Deductors**")
+            st.dataframe(pd.DataFrame([{
+                "Deductor":        d["deductor_name"],
+                "TAN":             d["tan"],
+                "Amount Credited": d["total_amount_credited"],
+                "Tax Deducted":    d["total_tax_deducted"],
+                "TDS Deposited":   d["total_tds_deposited"],
+                "Transactions":    len(d.get("_transactions", [])),
+            } for d in parsed["deductors"]]), use_container_width=True, hide_index=True)
 
-    # ── Parsed header preview ─────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("#### 🔍 Extracted Data Preview")
+        if parsed["self_tax"]:
+            st.markdown("**Self Assessment / Advance Tax (Part C)**")
+            st.dataframe(pd.DataFrame(parsed["self_tax"]),
+                         use_container_width=True, hide_index=True)
 
-    fcol1, fcol2, fcol3, fcol4 = st.columns(4)
-    fcol1.metric("PAN",             h["pan"])
-    fcol2.metric("Financial Year",  h["financial_year"])
-    fcol3.metric("Assessment Year", h["assessment_year"])
-    fcol4.metric("Format",          fmt)
+        if not parsed["deductors"] and not parsed["self_tax"]:
+            st.info("Header extracted but no TDS or tax payment rows found. Verify the PDF.")
 
-    # PAN mismatch warning
-    if h["pan"] and h["pan"] != selected_client["pan"]:
-        st.warning(f"⚠️ PAN in PDF ({h['pan']}) does not match selected client ({selected_client['pan']}). Please verify.")
+        total_tds  = sum(d["total_tds_deposited"] for d in parsed["deductors"])
+        total_self = sum(s["total_tax"] for s in parsed["self_tax"])
 
-    # Duplicate AY check
-    if ay_exists(selected_client["id"], h["assessment_year"]):
-        st.error(f"❌ AY {h['assessment_year']} already exists for this PAN. Delete existing record before re-uploading.")
+        st.markdown(f"""
+        <div class="summary-row">
+            <div class="summary-card">
+                <div class="label">Deductors Found</div>
+                <div class="value">{len(parsed["deductors"])}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">Total TDS Deposited</div>
+                <div class="value">₹{total_tds:,.0f}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">Self / Advance Tax</div>
+                <div class="value">₹{total_self:,.0f}</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">Self Tax Entries</div>
+                <div class="value">{len(parsed["self_tax"])}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("---")
+        if st.button("✅ Confirm & Save to Database", type="primary", use_container_width=True):
+            with st.spinner("Saving..."):
+                try:
+                    result = save_to_db(selected_client["id"], parsed)
+                    st.success(
+                        f"✅ Saved! Header ID: `{result['header_id']}` | "
+                        f"Deductors: `{result['deductor_count']}` | "
+                        f"Transactions: `{result['txn_count']}` | "
+                        f"Self Tax rows: `{result['self_tax_count']}`"
+                    )
+                except Exception as e:
+                    st.error(f"DB Error: {e}")
+
+    elif uploaded and not selected_client:
+        st.warning("Please select or add a client from the sidebar before uploading.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 2 — YEAR-WISE SUMMARY
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "📋 Year-wise Summary":
+
+    st.markdown("#### 📋 Year-wise Tax Summary")
+
+    if not selected_client:
+        st.warning("Please select a client from the sidebar.")
         st.stop()
 
-    # ── Deductors ─────────────────────────────────────────────────────────
-    if parsed["deductors"]:
-        st.markdown("**TDS Deductors**")
-        deductor_display = []
-        for d in parsed["deductors"]:
-            deductor_display.append({
-                "Deductor":         d["deductor_name"],
-                "TAN":              d["tan"],
-                "Amount Credited":  d["total_amount_credited"],
-                "Tax Deducted":     d["total_tax_deducted"],
-                "TDS Deposited":    d["total_tds_deposited"],
-                "Transactions":     len(d.get("_transactions", [])),
-            })
-        st.dataframe(pd.DataFrame(deductor_display), use_container_width=True, hide_index=True)
+    with st.spinner("Loading data..."):
+        df = fetch_summary(selected_client["id"])
 
-    # ── Self tax ──────────────────────────────────────────────────────────
-    if parsed["self_tax"]:
-        st.markdown("**Self Assessment / Advance Tax (Part C)**")
-        st.dataframe(pd.DataFrame(parsed["self_tax"]), use_container_width=True, hide_index=True)
+    if df.empty:
+        st.info(f"No data uploaded yet for {selected_client['name']}. "
+                f"Go to Upload page and add Form 26AS PDFs first.")
+        st.stop()
 
-    if not parsed["deductors"] and not parsed["self_tax"]:
-        st.info("Parser extracted header but found no TDS or tax payment rows. Verify the PDF is a standard TRACES 26AS.")
+    # ── Totals row ────────────────────────────────────────────────────────
+    totals = pd.DataFrame([{
+        "AY":                   "TOTAL",
+        "FY":                   "",
+        "Employer(s)":          f"{len(df)} years",
+        "Gross Income (₹)":     df["Gross Income (₹)"].sum(),
+        "TDS Deducted (₹)":     df["TDS Deducted (₹)"].sum(),
+        "Advance Tax (₹)":      df["Advance Tax (₹)"].sum(),
+        "Self-Assess Tax (₹)":  df["Self-Assess Tax (₹)"].sum(),
+        "Regular Assess (₹)":   df["Regular Assess (₹)"].sum(),
+        "Total Tax Paid (₹)":   df["Total Tax Paid (₹)"].sum(),
+        "Eff. TDS Rate (%)":    round(
+            df["TDS Deducted (₹)"].sum() / df["Gross Income (₹)"].sum() * 100, 1
+        ) if df["Gross Income (₹)"].sum() > 0 else 0,
+    }])
+    df_display = pd.concat([df, totals], ignore_index=True)
 
-    # ── Summary counts ────────────────────────────────────────────────────
-    total_tds = sum(d["total_tds_deposited"] for d in parsed["deductors"])
-    total_self = sum(s["total_tax"] for s in parsed["self_tax"])
+    # ── Format numbers ────────────────────────────────────────────────────
+    amount_cols = ["Gross Income (₹)", "TDS Deducted (₹)", "Advance Tax (₹)",
+                   "Self-Assess Tax (₹)", "Regular Assess (₹)", "Total Tax Paid (₹)"]
 
-    st.markdown(f"""
-    <div class="summary-row">
-        <div class="summary-card">
-            <div class="label">Deductors Found</div>
-            <div class="value">{len(parsed["deductors"])}</div>
-        </div>
-        <div class="summary-card">
-            <div class="label">Total TDS Deposited</div>
-            <div class="value">₹{total_tds:,.0f}</div>
-        </div>
-        <div class="summary-card">
-            <div class="label">Self / Advance Tax</div>
-            <div class="value">₹{total_self:,.0f}</div>
-        </div>
-        <div class="summary-card">
-            <div class="label">Self Tax Entries</div>
-            <div class="value">{len(parsed["self_tax"])}</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    def fmt_inr(val):
+        try:
+            if val == 0: return "—"
+            return f"₹{val:,.0f}"
+        except: return val
 
-    # ── Save button ───────────────────────────────────────────────────────
+    for col in amount_cols:
+        df_display[col] = df_display[col].apply(fmt_inr)
+    df_display["Eff. TDS Rate (%)"] = df_display["Eff. TDS Rate (%)"].apply(
+        lambda x: f"{x}%" if x else "—"
+    )
+
+    # ── Display table ─────────────────────────────────────────────────────
+    st.markdown(f"**{selected_client['name']}** &nbsp;|&nbsp; PAN: `{selected_client['pan']}`")
+    st.dataframe(
+        df_display,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "AY":                  st.column_config.TextColumn("Assessment Year", width="small"),
+            "FY":                  st.column_config.TextColumn("Financial Year",  width="small"),
+            "Employer(s)":         st.column_config.TextColumn("Employer(s)",     width="large"),
+            "Gross Income (₹)":    st.column_config.TextColumn("Gross Income",    width="medium"),
+            "TDS Deducted (₹)":    st.column_config.TextColumn("TDS Deducted",    width="medium"),
+            "Advance Tax (₹)":     st.column_config.TextColumn("Advance Tax",     width="medium"),
+            "Self-Assess Tax (₹)": st.column_config.TextColumn("Self-Assess Tax", width="medium"),
+            "Regular Assess (₹)":  st.column_config.TextColumn("Regular Assess",  width="medium"),
+            "Total Tax Paid (₹)":  st.column_config.TextColumn("Total Tax Paid",  width="medium"),
+            "Eff. TDS Rate (%)":   st.column_config.TextColumn("Eff. Rate",       width="small"),
+        }
+    )
+
+    # ── Quick metrics ──────────────────────────────────────────────────────
     st.markdown("---")
-    if st.button("✅ Confirm & Save to Database", type="primary", use_container_width=True):
-        with st.spinner("Saving..."):
-            try:
-                result = save_to_db(selected_client["id"], parsed)
-                st.success(f"""
-                    ✅ Saved successfully!  
-                    Header ID: `{result['header_id']}` | 
-                    Deductors: `{result['deductor_count']}` | 
-                    Transactions: `{result['txn_count']}` | 
-                    Self Tax rows: `{result['self_tax_count']}`
-                """)
-            except Exception as e:
-                st.error(f"DB Error: {e}")
+    raw = fetch_summary(selected_client["id"])   # unformatted for calculations
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Years of Data",     len(raw))
+    m2.metric("Total Income",      f"₹{raw['Gross Income (₹)'].sum():,.0f}")
+    m3.metric("Total TDS",         f"₹{raw['TDS Deducted (₹)'].sum():,.0f}")
+    m4.metric("Total Tax Paid",    f"₹{raw['Total Tax Paid (₹)'].sum():,.0f}")
 
-elif uploaded and not selected_client:
-    st.warning("Please select or add a client from the sidebar before uploading.")
+    # ── Export to Excel ───────────────────────────────────────────────────
+    st.markdown("---")
+    def to_excel(df_raw: pd.DataFrame) -> bytes:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            df_raw.to_excel(writer, index=False, sheet_name="26AS Summary")
+        return buf.getvalue()
+
+    excel_data = to_excel(raw)
+    st.download_button(
+        label="⬇️ Download as Excel",
+        data=excel_data,
+        file_name=f"Taxalytics_{selected_client['pan']}_summary.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
