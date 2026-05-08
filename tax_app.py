@@ -443,28 +443,49 @@ def extract_ais_tax_payments(pdf) -> list:
                 row_cells = [str(c).strip() if c else "" for c in row]
                 row_text  = " ".join(row_cells)
 
-                dates = DATE_RE.findall(row_text)
-                fys   = FY_RE.findall(row_text)
-                if not dates or not fys:
+                # Must have a FY like 2023-24
+                fys = FY_RE.findall(row_text)
+                if not fys:
                     continue
 
+                # Must match a major head
                 major = find_major(row_text)
-                minor = find_minor(row_text)
-                if not major or not minor:
+                if not major:
                     continue
 
-                bsr     = next((c.replace(",","") for c in row_cells
-                                if re.match(r'^\d{7}$', c.replace(",",""))), None)
-                challan = next((c.replace(",","") for c in row_cells
-                                if re.match(r'^\d{4,6}$', c.replace(",",""))
-                                and c.replace(",","") != (bsr or "")
-                                and not (2000 <= int(c.replace(",","")) <= 2100
-                                         if c.replace(",","").isdigit() else True)), None)
+                # Must match a minor head
+                minor = find_minor(row_text)
+                if not minor:
+                    continue
 
-                amounts = extract_amounts(row_text)
-                exclude = {float(bsr) if bsr else None,
-                           float(challan) if challan else None} - {None}
-                amounts = [a for a in amounts if a not in exclude]
+                # Date may or may not be in this row (wide tables get cut)
+                dates = DATE_RE.findall(row_text)
+
+                bsr = next((c.replace(",","") for c in row_cells
+                            if re.match(r'^\d{7}$', c.replace(",",""))), None)
+
+                challan_val = None
+                for c in row_cells:
+                    clean = c.replace(",","")
+                    if (re.match(r'^\d{4,6}$', clean)
+                            and clean != (bsr or "")
+                            and not (2000 <= int(clean) <= 2100)):
+                        challan_val = clean
+                        break
+
+                # Extract amounts — handle Indian comma format like 1,96,490
+                amounts = []
+                for c in row_cells:
+                    clean = c.replace(",", "").strip()
+                    if re.match(r'^\d+$', clean):
+                        val = int(clean)
+                        # Skip Sr.No (1-9), skip years, skip BSR, skip challan
+                        if (val == 0 or
+                            (val >= 100
+                             and not (2000 <= val <= 2100)
+                             and clean != (bsr or "")
+                             and clean != (challan_val or ""))):
+                            amounts.append(float(val))
 
                 results.append({
                     "major_head":      major,
@@ -477,8 +498,8 @@ def extract_ais_tax_payments(pdf) -> list:
                     "penalty":         0,
                     "interest":        0,
                     "bsr_code":        bsr or "",
-                    "date_of_deposit": dates[0],
-                    "challan_serial":  challan or "",
+                    "date_of_deposit": dates[0] if dates else None,
+                    "challan_serial":  challan_val or "",
                     "remarks":         "",
                     "source":          "AIS",
                 })
