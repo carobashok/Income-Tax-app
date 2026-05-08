@@ -153,17 +153,27 @@ def parse_amount(val) -> float:
 def extract_tds_tables(pdf, format_version: str) -> tuple:
     """
     Extract deductor summaries and transaction rows from TDS parts.
+    Uses column-position-based extraction for reliability.
     Returns (deductors_list, transactions_list)
     """
-    deductors    = []
-    transactions = []
+    deductors = []
 
-    # Keywords that signal a deductor summary row
-    TAN_PATTERN  = re.compile(r'^[A-Z]{4}\d{5}[A-Z]$')
-    SECTION_CODES = {"192", "192A", "193", "194", "194A", "194B", "194C",
-                     "194D", "194H", "194I", "194IA", "194IB", "194J",
-                     "194J(a)", "194J(b)", "194LA", "194M", "194N",
-                     "194O", "194Q", "194R", "194S", "195"}
+    TAN_PATTERN = re.compile(r'^[A-Z]{4}\d{5}[A-Z]$')
+    SECTION_CODES = {
+        "192", "192A", "193", "194", "194A", "194B", "194BA", "194C",
+        "194D", "194H", "194I", "194IA", "194IB", "194IC", "194J",
+        "194J(a)", "194J(b)", "194LA", "194M", "194N", "194O",
+        "194Q", "194R", "194S", "195"
+    }
+    DATE_RE   = re.compile(r'\d{1,2}-[A-Za-z]{3}-\d{4}')
+    AMOUNT_RE = re.compile(r'^\d{1,3}(,\d{3})*\.\d{2}$|^\d{4,}\.\d{2}$')
+
+    def is_amount(val):
+        clean = val.replace(",", "").strip()
+        return bool(re.match(r'^\d+\.\d{2}$', clean)) and float(clean) >= 0
+
+    def get_amounts(cells):
+        return [parse_amount(c) for c in cells if is_amount(c)]
 
     current_deductor = None
 
@@ -175,62 +185,58 @@ def extract_tds_tables(pdf, format_version: str) -> tuple:
             for row in table:
                 row = [str(c).strip() if c else "" for c in row]
 
-                # Detect deductor summary row: contains TAN
-                tan_cols = [i for i, c in enumerate(row) if TAN_PATTERN.match(c)]
-                if tan_cols:
-                    tan = row[tan_cols[0]]
-                    # Find name — typically the longest non-numeric cell before TAN
-                    name_candidates = [c for c in row[:tan_cols[0]] if len(c) > 5 and not c.replace(".","").replace(",","").isdigit()]
-                    dname = name_candidates[-1] if name_candidates else ""
-                    # Only pick amounts after TAN column to avoid Sr. No. contamination
-                    amounts = []
-                    for c in row[tan_cols[0]+1:]:
-                        clean = c.replace(",", "").strip()
-                        if re.match(r'^\d+\.\d{2}$', clean) or (clean.isdigit() and int(clean) > 99):
-                            amounts.append(parse_amount(c))
+                # ── Deductor summary row: identified by TAN pattern ──────────
+                tan_idx = next((i for i, c in enumerate(row) if TAN_PATTERN.match(c)), None)
+                if tan_idx is not None:
+                    tan = row[tan_idx]
+                    # Name = longest text cell before TAN, not a number
+                    name_cells = [
+                        c for c in row[:tan_idx]
+                        if len(c) > 5 and not c.replace(".", "").replace(",", "").isdigit()
+                    ]
+                    dname = max(name_cells, key=len) if name_cells else ""
+
+                    # Amounts are the 3 cells immediately after TAN (Amount, Tax, Deposited)
+                    after_tan = [c for c in row[tan_idx + 1:] if c and c != "-"]
+                    amounts = get_amounts(after_tan)
+
                     current_deductor = {
-                        "deductor_name":         dname,
-                        "tan":                   tan,
-                        "total_amount_credited":  amounts[0] if len(amounts) > 0 else 0,
-                        "total_tax_deducted":     amounts[1] if len(amounts) > 1 else 0,
-                        "total_tds_deposited":    amounts[2] if len(amounts) > 2 else 0,
-                        "part_label":             "I" if format_version == "NEW" else "A",
-                        "_transactions":          []
+                        "deductor_name":        dname,
+                        "tan":                  tan,
+                        "total_amount_credited": amounts[0] if len(amounts) > 0 else 0,
+                        "total_tax_deducted":    amounts[1] if len(amounts) > 1 else 0,
+                        "total_tds_deposited":   amounts[2] if len(amounts) > 2 else 0,
+                        "part_label":            "I" if format_version == "NEW" else "A",
+                        "_transactions":         []
                     }
                     deductors.append(current_deductor)
                     continue
 
-                # Detect transaction row: first meaningful cell is a section code or sr no
-                if current_deductor and len(row) >= 5:
-                    # Check if row has a section code
-                    section_found = None
-                    for cell in row:
-                        if cell in SECTION_CODES:
-                            section_found = cell
-                            break
+                # ── Transaction row: identified by section code ───────────────
+                if current_deductor:
+                    section = next((c for c in row if c in SECTION_CODES), None)
+                    if section:
+                        dates   = DATE_RE.findall(" ".join(row))
+                        amounts = get_amounts(row)
 
-                    if section_found:
-                        # Parse date fields
-                        dates = re.findall(r'\d{1,2}-\w{3}-\d{4}', " ".join(row))
-                        amounts = []
-                        for cell in row:
-                            clean = cell.replace(",", "").strip()
-                            if re.match(r'^\d+\.\d{2}$', clean) or (clean.isdigit() and int(clean) > 99):
-                                amounts.append(parse_amount(cell))
+                        # Booking status: single letter F/U/P/O/M/Z in its own cell
+                        status = next(
+                            (c for c in row if c in {"F", "U", "P", "O", "M", "Z"}), ""
+                        )
 
-                        # Booking status
-                        status_match = re.search(r'\b[FUPOMZ]\b', " ".join(row))
-                        status = status_match.group(0) if status_match else ""
+                        # Skip glossary/reference rows — real transactions must have a date
+                        if not dates:
+                            continue
 
                         txn = {
-                            "section_code":     section_found,
-                            "transaction_date":  dates[0] if len(dates) > 0 else None,
-                            "booking_status":    status,
-                            "date_of_booking":   dates[1] if len(dates) > 1 else None,
-                            "remarks":           "",
-                            "amount_paid":       amounts[0] if len(amounts) > 0 else 0,
-                            "tax_deducted":      amounts[1] if len(amounts) > 1 else 0,
-                            "tds_deposited":     amounts[2] if len(amounts) > 2 else 0,
+                            "section_code":     section,
+                            "transaction_date": dates[0] if len(dates) > 0 else None,
+                            "booking_status":   status,
+                            "date_of_booking":  dates[1] if len(dates) > 1 else None,
+                            "remarks":          "",
+                            "amount_paid":      amounts[0] if len(amounts) > 0 else 0,
+                            "tax_deducted":     amounts[1] if len(amounts) > 1 else 0,
+                            "tds_deposited":    amounts[2] if len(amounts) > 2 else 0,
                         }
                         current_deductor["_transactions"].append(txn)
 
