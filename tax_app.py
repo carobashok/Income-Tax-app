@@ -463,27 +463,34 @@ def extract_ais_tax_payments(pdf) -> list:
                 bsr = next((c.replace(",","") for c in row_cells
                             if re.match(r'^\d{7}$', c.replace(",",""))), None)
 
+                # Challan serial: typically 4-5 digits and < 99999
+                # Exclude amounts (which can be 6 digits like 196490)
                 challan_val = None
                 for c in row_cells:
                     clean = c.replace(",","")
-                    if (re.match(r'^\d{4,6}$', clean)
+                    if (re.match(r'^\d{4,5}$', clean)
                             and clean != (bsr or "")
                             and not (2000 <= int(clean) <= 2100)):
                         challan_val = clean
                         break
 
                 # Extract amounts — handle Indian comma format like 1,96,490
+                # Key: treat comma-separated numbers as single amounts
                 amounts = []
                 for c in row_cells:
                     clean = c.replace(",", "").strip()
                     if re.match(r'^\d+$', clean):
                         val = int(clean)
-                        # Skip Sr.No (1-9), skip years, skip BSR, skip challan
-                        if (val == 0 or
-                            (val >= 100
-                             and not (2000 <= val <= 2100)
-                             and clean != (bsr or "")
-                             and clean != (challan_val or ""))):
+                        # Skip Sr.No (single digit 1-9)
+                        # Skip years (2000-2100)
+                        # Skip BSR (7 digits)
+                        # Skip challan
+                        if (val == 0
+                            or (val >= 100
+                                and not (2000 <= val <= 2100)
+                                and clean != (bsr or "")
+                                and clean != (challan_val or "")
+                                and len(clean) != 7)):  # not BSR length
                             amounts.append(float(val))
 
                 results.append({
