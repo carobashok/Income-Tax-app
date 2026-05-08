@@ -353,14 +353,11 @@ def save_to_db(client_id: int, parsed: dict) -> dict:
 
 def extract_ais_header(text: str) -> dict:
     """Extract PAN, name, financial year from AIS PDF text."""
-    pan  = re.search(r'([A-Z]{5}[0-9]{4}[A-Z])', text)
-    fy   = re.search(r'Financial Year\s+(\d{4}-\d{2,4})', text)
-    name = re.search(r'Name of Assessee\s+([A-Z ]+)', text)
-    if not name:
-        name = re.search(r'VENKATARAMAN|([A-Z]{2,}\s[A-Z]{2,}\s[A-Z]{2,})', text)
+    pan  = re.search(r'\b([A-Z]{5}[0-9]{4}[A-Z])\b', text)
+    fy   = re.search(r'Financial Year\s+(20\d{2}-\d{2,4})', text)
+    name = re.search(r'Name of Assessee\s*\n?\s*([A-Z][A-Z ]+)', text)
 
     raw_fy = fy.group(1).strip() if fy else ""
-    # Derive assessment year from FY (e.g. 2021-22 → 2022-23)
     ay = ""
     if raw_fy:
         try:
@@ -368,21 +365,28 @@ def extract_ais_header(text: str) -> dict:
             ay = f"{start_yr + 1}-{str(start_yr + 2)[-2:]}"
         except: pass
 
+    assessee = ""
+    if name:
+        assessee = name.group(1).strip()
+    else:
+        # fallback — look for name after PAN line
+        m = re.search(r'AEUPA\w+\s+XXXX.+?\s+([A-Z][A-Z ]{5,})', text)
+        if m:
+            assessee = m.group(1).strip()
+
     return {
         "pan":             pan.group(1).strip() if pan else "",
         "financial_year":  raw_fy,
         "assessment_year": ay,
-        "assessee_name":   name.group(1).strip() if name and name.lastindex else "",
+        "assessee_name":   assessee,
         "address":         "",
         "data_updated_on": None,
     }
 
 def extract_ais_tax_payments(pdf) -> list:
     """
-    Extract Part B3 — Tax Payments from AIS PDF.
-    AIS format uses text labels for Major/Minor heads and integer amounts.
-    Strategy: scan ALL tables across ALL pages for rows matching B3 pattern.
-    A valid B3 row has: a FY (20XX-XX), a date (DD/MM/YYYY), and numeric amounts.
+    Extract Part B3 tax payments from AIS PDF.
+    Uses both table extraction and raw text parsing as fallback.
     """
     results = []
 
@@ -405,80 +409,61 @@ def extract_ais_tax_payments(pdf) -> list:
     DATE_RE = re.compile(r'\d{2}/\d{2}/\d{4}')
     FY_RE   = re.compile(r'20\d{2}-\d{2,4}')
 
-    def find_major(row_text):
-        t = row_text.lower()
+    def find_major(text):
+        t = text.lower()
         for label, code in MAJOR_HEAD_MAP.items():
             if label in t:
                 return code
         return None
 
-    def find_minor(row_text):
-        t = row_text.lower()
+    def find_minor(text):
+        t = text.lower()
         for label, code in MINOR_HEAD_MAP.items():
             if label in t:
                 return code
         return None
 
-    def get_numeric_amounts(row):
-        """Extract all pure integer amounts, ignoring Sr.No, FY years, BSR, challan."""
-        amounts = []
-        for c in row:
-            clean = c.replace(",", "").strip()
+    def extract_amounts(text):
+        """Extract all Indian-format integers from text, skip small nos and years."""
+        nums = []
+        for m in re.finditer(r'[\d,]+', text):
+            clean = m.group().replace(",", "")
             if re.match(r'^\d+$', clean):
                 val = int(clean)
-                # Skip Sr. No. (1-99), skip years (2000-2099), skip BSR (7 digits handled separately)
-                if val >= 100 and not (2000 <= val <= 2099):
-                    amounts.append(float(val))
-                elif val == 0:
-                    amounts.append(0.0)
-        return amounts
+                if val == 0:
+                    nums.append(0.0)
+                elif val >= 100 and not (2000 <= val <= 2100):
+                    nums.append(float(val))
+        return nums
 
+    # ── Strategy 1: Table extraction ─────────────────────────────────────
     for page in pdf.pages:
         for table in (page.extract_tables() or []):
             for row in table:
-                row = [str(c).strip() if c else "" for c in row]
-                row_text = " ".join(row)
+                row_cells = [str(c).strip() if c else "" for c in row]
+                row_text  = " ".join(row_cells)
 
-                # Must have a DD/MM/YYYY date — key identifier of B3 data row
                 dates = DATE_RE.findall(row_text)
-                if not dates:
+                fys   = FY_RE.findall(row_text)
+                if not dates or not fys:
                     continue
 
-                # Must have a FY like 2023-24
-                fys = FY_RE.findall(row_text)
-                if not fys:
-                    continue
-
-                # Must match a major head
                 major = find_major(row_text)
-                if not major:
-                    continue
-
-                # Must match a minor head
                 minor = find_minor(row_text)
-                if not minor:
+                if not major or not minor:
                     continue
 
-                # BSR code: exactly 7 digits
-                bsr = next(
-                    (c.replace(",","") for c in row
-                     if re.match(r'^\d{7}$', c.replace(",",""))), None
-                )
+                bsr     = next((c.replace(",","") for c in row_cells
+                                if re.match(r'^\d{7}$', c.replace(",",""))), None)
+                challan = next((c.replace(",","") for c in row_cells
+                                if re.match(r'^\d{4,6}$', c.replace(",",""))
+                                and c.replace(",","") != (bsr or "")
+                                and not (2000 <= int(c.replace(",","")) <= 2100
+                                         if c.replace(",","").isdigit() else True)), None)
 
-                # Challan serial: 4-6 digits, not BSR, not year
-                challan = next(
-                    (c.replace(",","") for c in row
-                     if re.match(r'^\d{4,6}$', c.replace(",",""))
-                     and c.replace(",","") != (bsr or "")
-                     and not (2000 <= int(c.replace(",","")) <= 2099)), None
-                )
-
-                amounts = get_numeric_amounts(row)
-
-                # Remove BSR and challan values from amounts list
-                exclude = set()
-                if bsr: exclude.add(float(bsr))
-                if challan: exclude.add(float(challan))
+                amounts = extract_amounts(row_text)
+                exclude = {float(bsr) if bsr else None,
+                           float(challan) if challan else None} - {None}
                 amounts = [a for a in amounts if a not in exclude]
 
                 results.append({
@@ -497,6 +482,53 @@ def extract_ais_tax_payments(pdf) -> list:
                     "remarks":         "",
                     "source":          "AIS",
                 })
+
+    if results:
+        return results
+
+    # ── Strategy 2: Raw text fallback (when table extraction misses rows) ─
+    # Look for lines containing a date AND a FY AND a major/minor head text
+    full_text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    in_b3 = False
+    for line in full_text.split("\n"):
+        if "Part B3" in line or "B3-Information relating to payment" in line:
+            in_b3 = True
+        if in_b3 and ("Part B4" in line or "B4-Information" in line):
+            in_b3 = False
+        if not in_b3:
+            continue
+
+        dates = DATE_RE.findall(line)
+        fys   = FY_RE.findall(line)
+        if not dates or not fys:
+            continue
+
+        major = find_major(line)
+        minor = find_minor(line)
+        if not major or not minor:
+            continue
+
+        bsr     = next((m.group() for m in re.finditer(r'\b\d{7}\b', line)), None)
+        amounts = extract_amounts(line)
+        exclude = {float(bsr)} if bsr else set()
+        amounts = [a for a in amounts if a not in exclude]
+
+        results.append({
+            "major_head":      major,
+            "minor_head":      minor,
+            "tax":             amounts[0] if len(amounts) > 0 else 0,
+            "surcharge":       amounts[1] if len(amounts) > 1 else 0,
+            "education_cess":  amounts[2] if len(amounts) > 2 else 0,
+            "others":          amounts[3] if len(amounts) > 3 else 0,
+            "total_tax":       amounts[4] if len(amounts) > 4 else 0,
+            "penalty":         0,
+            "interest":        0,
+            "bsr_code":        bsr or "",
+            "date_of_deposit": dates[0],
+            "challan_serial":  "",
+            "remarks":         "",
+            "source":          "AIS",
+        })
 
     return results
 
