@@ -182,7 +182,12 @@ def extract_tds_tables(pdf, format_version: str) -> tuple:
                     # Find name — typically the longest non-numeric cell before TAN
                     name_candidates = [c for c in row[:tan_cols[0]] if len(c) > 5 and not c.replace(".","").replace(",","").isdigit()]
                     dname = name_candidates[-1] if name_candidates else ""
-                    amounts = [parse_amount(c) for c in row if c.replace(".","").replace(",","").replace("-","").isdigit() and len(c) > 0]
+                    # Only pick amounts after TAN column to avoid Sr. No. contamination
+                    amounts = []
+                    for c in row[tan_cols[0]+1:]:
+                        clean = c.replace(",", "").strip()
+                        if re.match(r'^\d+\.\d{2}$', clean) or (clean.isdigit() and int(clean) > 99):
+                            amounts.append(parse_amount(c))
                     current_deductor = {
                         "deductor_name":         dname,
                         "tan":                   tan,
@@ -209,8 +214,8 @@ def extract_tds_tables(pdf, format_version: str) -> tuple:
                         dates = re.findall(r'\d{1,2}-\w{3}-\d{4}', " ".join(row))
                         amounts = []
                         for cell in row:
-                            clean = cell.replace(",", "").replace("-", "").strip()
-                            if re.match(r'^\d+\.\d{2}$', clean) or (clean.isdigit() and len(clean) > 2):
+                            clean = cell.replace(",", "").strip()
+                            if re.match(r'^\d+\.\d{2}$', clean) or (clean.isdigit() and int(clean) > 99):
                                 amounts.append(parse_amount(cell))
 
                         # Booking status
