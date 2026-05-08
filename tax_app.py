@@ -380,29 +380,60 @@ def extract_ais_header(text: str) -> dict:
 def extract_ais_tax_payments(pdf) -> list:
     """
     Extract Part B3 — Tax Payments from AIS PDF.
-    Columns: FY | Major Head | Minor Head | Tax(A) | Surcharge(B) |
-             Ed Cess(C) | Others(D) | Total(A+B+C+D) | BSR | Date | Challan | CIN
+    AIS format: SR.NO | FINANCIAL YEAR | MAJOR HEAD (text) | MINOR HEAD (text) |
+                TAX(A) | SURCHARGE(B) | EDUCATION CESS(C) | OTHERS(D) |
+                TOTAL(A+B+C+D) | BSR CODE | DATE OF DEPOSIT | CHALLAN SERIAL | CIN
+    Amounts are integers with commas (no .00), dates are DD/MM/YYYY.
+    Major/Minor heads are text labels, not codes.
     """
-    results  = []
-    MINOR_HEADS = {"100","102","106","107","300","400","800","200"}
-    MAJOR_HEADS = {"0020","0021","0023","0024","0026","0028","0031","0032","0033"}
-    DATE_RE  = re.compile(r'\d{2}/\d{2}/\d{4}|\d{1,2}-[A-Za-z]{3}-\d{4}')
+    results = []
+
+    # Text → code mappings
+    MAJOR_HEAD_MAP = {
+        "income tax (other than companies)": "0021",
+        "corporation tax":                   "0020",
+        "income tax":                        "0021",
+    }
+    MINOR_HEAD_MAP = {
+        "advance tax":              "100",
+        "self assessment":          "300",
+        "self assessment tax":      "300",
+        "regular assessment":       "400",
+        "regular assessment tax":   "400",
+        "tds/tcs":                  "200",
+        "surtax":                   "102",
+    }
+    DATE_RE  = re.compile(r'\d{2}/\d{2}/\d{4}')
     FY_RE    = re.compile(r'20\d{2}-\d{2,4}')
     in_b3    = False
 
-    def is_decimal(val):
-        clean = val.replace(",", "").strip()
-        return bool(re.match(r'^\d+\.\d{2}$', clean))
+    def parse_int_amount(val):
+        """Parse amounts like 1,96,490 or 0 — no decimals in AIS."""
+        try:
+            return float(str(val).replace(",", "").strip())
+        except:
+            return 0.0
+
+    def find_major(row):
+        joined = " ".join(row).lower()
+        for label, code in MAJOR_HEAD_MAP.items():
+            if label in joined:
+                return code
+        return None
+
+    def find_minor(row):
+        joined = " ".join(row).lower()
+        for label, code in MINOR_HEAD_MAP.items():
+            if label in joined:
+                return code
+        return None
 
     for page in pdf.pages:
         text = page.extract_text() or ""
-
-        # Detect Part B3 section
         if "Part B3" in text or "B3-Information relating to payment" in text:
             in_b3 = True
         if in_b3 and ("Part B4" in text or "B4-Information" in text):
             in_b3 = False
-
         if not in_b3:
             continue
 
@@ -410,42 +441,65 @@ def extract_ais_tax_payments(pdf) -> list:
             for row in table:
                 row = [str(c).strip() if c else "" for c in row]
 
-                major = next((c for c in row if c in MAJOR_HEADS), None)
-                minor = next((c for c in row if c in MINOR_HEADS), None)
-                if not major or not minor:
-                    continue
-
-                dates   = DATE_RE.findall(" ".join(row))
+                # Must have a date in DD/MM/YYYY format
+                dates = DATE_RE.findall(" ".join(row))
                 if not dates:
                     continue
 
-                decimals = [float(c.replace(",","")) for c in row
-                            if is_decimal(c.replace(",","").strip()
-                            if "," not in c else c)]
+                # Must have FY like 2023-24
+                fys = FY_RE.findall(" ".join(row))
+                if not fys:
+                    continue
 
-                # Try getting decimals more robustly
-                decimals = []
+                major = find_major(row)
+                minor = find_minor(row)
+                if not major or not minor:
+                    continue
+
+                # Extract numeric amounts — all cells that are pure numbers
+                # after removing commas (AIS uses Indian number format)
+                nums = []
                 for c in row:
                     clean = c.replace(",", "").strip()
-                    try:
-                        if re.match(r'^\d+\.\d{2}$', clean):
-                            decimals.append(float(clean))
-                    except: pass
+                    if re.match(r'^\d+$', clean) and len(clean) >= 1:
+                        # Skip Sr.No (single digit), skip years
+                        val = int(clean)
+                        if val > 9 or len(clean) > 1:  # skip Sr. No.
+                            nums.append(float(val))
 
-                bsr     = next((c for c in row if re.match(r'^\d{7}$', c.replace(",",""))), None)
+                # BSR code: 7-digit number
+                bsr = next(
+                    (c.replace(",","") for c in row
+                     if re.match(r'^\d{7}$', c.replace(",",""))), None
+                )
+
+                # Challan serial: 4-6 digit number, not BSR
                 challan = next(
-                    (c for c in row if re.match(r'^\d{4,6}$', c)
-                     and c != bsr and c not in MAJOR_HEADS
-                     and c not in MINOR_HEADS and not DATE_RE.match(c)), None)
+                    (c for c in row
+                     if re.match(r'^\d{4,6}$', c.replace(",",""))
+                     and c.replace(",","") != bsr), None
+                )
+
+                # Remove BSR and challan from nums to get tax amounts
+                amount_nums = []
+                for c in row:
+                    clean = c.replace(",", "").strip()
+                    if (re.match(r'^\d+$', clean)
+                            and clean != (bsr or "")
+                            and clean != (challan or "")
+                            and len(clean) >= 1):
+                        val = int(clean)
+                        if val > 9 or len(clean) > 1:
+                            amount_nums.append(float(val))
 
                 results.append({
                     "major_head":      major,
                     "minor_head":      minor,
-                    "tax":             decimals[0] if len(decimals) > 0 else 0,
-                    "surcharge":       decimals[1] if len(decimals) > 1 else 0,
-                    "education_cess":  decimals[2] if len(decimals) > 2 else 0,
-                    "others":          decimals[3] if len(decimals) > 3 else 0,
-                    "total_tax":       decimals[4] if len(decimals) > 4 else 0,
+                    "tax":             amount_nums[0] if len(amount_nums) > 0 else 0,
+                    "surcharge":       amount_nums[1] if len(amount_nums) > 1 else 0,
+                    "education_cess":  amount_nums[2] if len(amount_nums) > 2 else 0,
+                    "others":          amount_nums[3] if len(amount_nums) > 3 else 0,
+                    "total_tax":       amount_nums[4] if len(amount_nums) > 4 else 0,
                     "penalty":         0,
                     "interest":        0,
                     "bsr_code":        bsr or "",
