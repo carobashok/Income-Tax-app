@@ -449,13 +449,16 @@ def extract_ais_tax_payments(pdf) -> list:
         "income tax":                        "0021",
     }
     MINOR_HEAD_MAP = {
-        "advance tax":            "100",
-        "self assessment":        "300",
-        "self assessment tax":    "300",
-        "regular assessment":     "400",
-        "regular assessment tax": "400",
-        "tds/tcs":                "200",
-        "surtax":                 "102",
+        "advance tax":                        "100",
+        "self assessment":                    "300",
+        "self assessment tax":                "300",
+        "regular assessment":                 "400",
+        "regular assessment tax":             "400",
+        "outstanding demand":                 "400",
+        "tds/tcs regular assessment":         "400",
+        "outstanding demand (regular assessment tax)": "400",
+        "tds/tcs":                            "200",
+        "surtax":                             "102",
     }
 
     DATE_RE = re.compile(r'\d{2}/\d{2}/\d{4}')
@@ -515,49 +518,44 @@ def extract_ais_tax_payments(pdf) -> list:
                 bsr = next((c.replace(",","") for c in row_cells
                             if re.match(r'^\d{7}$', c.replace(",",""))), None)
 
-                # Challan serial: typically 4-5 digits and < 99999
-                # Exclude amounts (which can be 6 digits like 196490)
-                challan_val = None
-                for c in row_cells:
-                    clean = c.replace(",","")
-                    if (re.match(r'^\d{4,5}$', clean)
-                            and clean != (bsr or "")
-                            and not (2000 <= int(clean) <= 2100)):
-                        challan_val = clean
-                        break
+                # AIS B3 column order (0-indexed):
+                # 0=SR, 1=FY, 2=MAJOR HEAD, 3=MINOR HEAD, 4=TAX(A),
+                # 5=SURCHARGE(B), 6=ED CESS(C), 7=OTHERS(D),
+                # 8=TOTAL(A+B+C+D), 9=BSR CODE, 10=DATE, 11=CHALLAN SERIAL, 12=CIN
+                def clean_num(val):
+                    try:
+                        return float(val.replace(",","").strip())
+                    except:
+                        return 0.0
 
-                # Extract amounts — handle Indian comma format like 1,96,490
-                # Key: treat comma-separated numbers as single amounts
-                amounts = []
-                for c in row_cells:
-                    clean = c.replace(",", "").strip()
-                    if re.match(r'^\d+$', clean):
-                        val = int(clean)
-                        # Skip Sr.No (single digit 1-9)
-                        # Skip years (2000-2100)
-                        # Skip BSR (7 digits)
-                        # Skip challan
-                        if (val == 0
-                            or (val >= 100
-                                and not (2000 <= val <= 2100)
-                                and clean != (bsr or "")
-                                and clean != (challan_val or "")
-                                and len(clean) != 7)):  # not BSR length
-                            amounts.append(float(val))
+                n = len(row_cells)
+                tax      = clean_num(row_cells[4])  if n > 4  else 0
+                surch    = clean_num(row_cells[5])  if n > 5  else 0
+                edcess   = clean_num(row_cells[6])  if n > 6  else 0
+                others   = clean_num(row_cells[7])  if n > 7  else 0
+                total    = clean_num(row_cells[8])  if n > 8  else 0
+                bsr      = row_cells[9].replace(",","")  if n > 9  else ""
+                date_raw = row_cells[10]             if n > 10 else ""
+                challan  = row_cells[11]             if n > 11 else ""
+
+                # Fallback date from any DD/MM/YYYY in row if column 10 is empty
+                if not DATE_RE.match(date_raw):
+                    dates = DATE_RE.findall(row_text)
+                    date_raw = dates[0] if dates else ""
 
                 results.append({
                     "major_head":      major,
                     "minor_head":      minor,
-                    "tax":             amounts[0] if len(amounts) > 0 else 0,
-                    "surcharge":       amounts[1] if len(amounts) > 1 else 0,
-                    "education_cess":  amounts[2] if len(amounts) > 2 else 0,
-                    "others":          amounts[3] if len(amounts) > 3 else 0,
-                    "total_tax":       amounts[4] if len(amounts) > 4 else 0,
+                    "tax":             tax,
+                    "surcharge":       surch,
+                    "education_cess":  edcess,
+                    "others":          others,
+                    "total_tax":       total,
                     "penalty":         0,
                     "interest":        0,
-                    "bsr_code":        bsr or "",
-                    "date_of_deposit": convert_ais_date(dates[0]) if dates else None,
-                    "challan_serial":  challan_val or "",
+                    "bsr_code":        bsr,
+                    "date_of_deposit": convert_ais_date(date_raw) if date_raw else None,
+                    "challan_serial":  challan,
                     "remarks":         "",
                     "source":          "AIS",
                 })
