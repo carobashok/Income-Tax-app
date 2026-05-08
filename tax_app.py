@@ -380,134 +380,124 @@ def extract_ais_header(text: str) -> dict:
 def extract_ais_tax_payments(pdf) -> list:
     """
     Extract Part B3 — Tax Payments from AIS PDF.
-    AIS format: SR.NO | FINANCIAL YEAR | MAJOR HEAD (text) | MINOR HEAD (text) |
-                TAX(A) | SURCHARGE(B) | EDUCATION CESS(C) | OTHERS(D) |
-                TOTAL(A+B+C+D) | BSR CODE | DATE OF DEPOSIT | CHALLAN SERIAL | CIN
-    Amounts are integers with commas (no .00), dates are DD/MM/YYYY.
-    Major/Minor heads are text labels, not codes.
+    AIS format uses text labels for Major/Minor heads and integer amounts.
+    Strategy: scan ALL tables across ALL pages for rows matching B3 pattern.
+    A valid B3 row has: a FY (20XX-XX), a date (DD/MM/YYYY), and numeric amounts.
     """
     results = []
 
-    # Text → code mappings
     MAJOR_HEAD_MAP = {
         "income tax (other than companies)": "0021",
+        "income tax other than companies":   "0021",
         "corporation tax":                   "0020",
         "income tax":                        "0021",
     }
     MINOR_HEAD_MAP = {
-        "advance tax":              "100",
-        "self assessment":          "300",
-        "self assessment tax":      "300",
-        "regular assessment":       "400",
-        "regular assessment tax":   "400",
-        "tds/tcs":                  "200",
-        "surtax":                   "102",
+        "advance tax":            "100",
+        "self assessment":        "300",
+        "self assessment tax":    "300",
+        "regular assessment":     "400",
+        "regular assessment tax": "400",
+        "tds/tcs":                "200",
+        "surtax":                 "102",
     }
-    DATE_RE  = re.compile(r'\d{2}/\d{2}/\d{4}')
-    FY_RE    = re.compile(r'20\d{2}-\d{2,4}')
-    in_b3    = False
 
-    def parse_int_amount(val):
-        """Parse amounts like 1,96,490 or 0 — no decimals in AIS."""
-        try:
-            return float(str(val).replace(",", "").strip())
-        except:
-            return 0.0
+    DATE_RE = re.compile(r'\d{2}/\d{2}/\d{4}')
+    FY_RE   = re.compile(r'20\d{2}-\d{2,4}')
 
-    def find_major(row):
-        joined = " ".join(row).lower()
+    def find_major(row_text):
+        t = row_text.lower()
         for label, code in MAJOR_HEAD_MAP.items():
-            if label in joined:
+            if label in t:
                 return code
         return None
 
-    def find_minor(row):
-        joined = " ".join(row).lower()
+    def find_minor(row_text):
+        t = row_text.lower()
         for label, code in MINOR_HEAD_MAP.items():
-            if label in joined:
+            if label in t:
                 return code
         return None
+
+    def get_numeric_amounts(row):
+        """Extract all pure integer amounts, ignoring Sr.No, FY years, BSR, challan."""
+        amounts = []
+        for c in row:
+            clean = c.replace(",", "").strip()
+            if re.match(r'^\d+$', clean):
+                val = int(clean)
+                # Skip Sr. No. (1-99), skip years (2000-2099), skip BSR (7 digits handled separately)
+                if val >= 100 and not (2000 <= val <= 2099):
+                    amounts.append(float(val))
+                elif val == 0:
+                    amounts.append(0.0)
+        return amounts
 
     for page in pdf.pages:
-        text = page.extract_text() or ""
-        if "Part B3" in text or "B3-Information relating to payment" in text:
-            in_b3 = True
-        if in_b3 and ("Part B4" in text or "B4-Information" in text):
-            in_b3 = False
-        if not in_b3:
-            continue
-
         for table in (page.extract_tables() or []):
             for row in table:
                 row = [str(c).strip() if c else "" for c in row]
+                row_text = " ".join(row)
 
-                # Must have a date in DD/MM/YYYY format
-                dates = DATE_RE.findall(" ".join(row))
+                # Must have a DD/MM/YYYY date — key identifier of B3 data row
+                dates = DATE_RE.findall(row_text)
                 if not dates:
                     continue
 
-                # Must have FY like 2023-24
-                fys = FY_RE.findall(" ".join(row))
+                # Must have a FY like 2023-24
+                fys = FY_RE.findall(row_text)
                 if not fys:
                     continue
 
-                major = find_major(row)
-                minor = find_minor(row)
-                if not major or not minor:
+                # Must match a major head
+                major = find_major(row_text)
+                if not major:
                     continue
 
-                # Extract numeric amounts — all cells that are pure numbers
-                # after removing commas (AIS uses Indian number format)
-                nums = []
-                for c in row:
-                    clean = c.replace(",", "").strip()
-                    if re.match(r'^\d+$', clean) and len(clean) >= 1:
-                        # Skip Sr.No (single digit), skip years
-                        val = int(clean)
-                        if val > 9 or len(clean) > 1:  # skip Sr. No.
-                            nums.append(float(val))
+                # Must match a minor head
+                minor = find_minor(row_text)
+                if not minor:
+                    continue
 
-                # BSR code: 7-digit number
+                # BSR code: exactly 7 digits
                 bsr = next(
                     (c.replace(",","") for c in row
                      if re.match(r'^\d{7}$', c.replace(",",""))), None
                 )
 
-                # Challan serial: 4-6 digit number, not BSR
+                # Challan serial: 4-6 digits, not BSR, not year
                 challan = next(
-                    (c for c in row
+                    (c.replace(",","") for c in row
                      if re.match(r'^\d{4,6}$', c.replace(",",""))
-                     and c.replace(",","") != bsr), None
+                     and c.replace(",","") != (bsr or "")
+                     and not (2000 <= int(c.replace(",","")) <= 2099)), None
                 )
 
-                # Remove BSR and challan from nums to get tax amounts
-                amount_nums = []
-                for c in row:
-                    clean = c.replace(",", "").strip()
-                    if (re.match(r'^\d+$', clean)
-                            and clean != (bsr or "")
-                            and clean != (challan or "")
-                            and len(clean) >= 1):
-                        val = int(clean)
-                        if val > 9 or len(clean) > 1:
-                            amount_nums.append(float(val))
+                amounts = get_numeric_amounts(row)
+
+                # Remove BSR and challan values from amounts list
+                exclude = set()
+                if bsr: exclude.add(float(bsr))
+                if challan: exclude.add(float(challan))
+                amounts = [a for a in amounts if a not in exclude]
 
                 results.append({
                     "major_head":      major,
                     "minor_head":      minor,
-                    "tax":             amount_nums[0] if len(amount_nums) > 0 else 0,
-                    "surcharge":       amount_nums[1] if len(amount_nums) > 1 else 0,
-                    "education_cess":  amount_nums[2] if len(amount_nums) > 2 else 0,
-                    "others":          amount_nums[3] if len(amount_nums) > 3 else 0,
-                    "total_tax":       amount_nums[4] if len(amount_nums) > 4 else 0,
+                    "tax":             amounts[0] if len(amounts) > 0 else 0,
+                    "surcharge":       amounts[1] if len(amounts) > 1 else 0,
+                    "education_cess":  amounts[2] if len(amounts) > 2 else 0,
+                    "others":          amounts[3] if len(amounts) > 3 else 0,
+                    "total_tax":       amounts[4] if len(amounts) > 4 else 0,
                     "penalty":         0,
                     "interest":        0,
                     "bsr_code":        bsr or "",
-                    "date_of_deposit": dates[0] if dates else None,
+                    "date_of_deposit": dates[0],
                     "challan_serial":  challan or "",
                     "remarks":         "",
                     "source":          "AIS",
                 })
+
     return results
 
 def parse_ais_pdf(uploaded_file, password: str = "") -> dict:
