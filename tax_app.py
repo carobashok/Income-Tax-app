@@ -391,6 +391,37 @@ def convert_ais_date(date_str: str) -> str:
         "data_updated_on": None,
     }
 
+def extract_ais_header(text: str) -> dict:
+    """Extract PAN, name, financial year from AIS PDF text."""
+    pan  = re.search(r'\b([A-Z]{5}[0-9]{4}[A-Z])\b', text)
+    fy   = re.search(r'Financial Year\s+(20\d{2}-\d{2,4})', text)
+    name = re.search(r'Name of Assessee\s*\n?\s*([A-Z][A-Z ]+)', text)
+
+    raw_fy = fy.group(1).strip() if fy else ""
+    ay = ""
+    if raw_fy:
+        try:
+            start_yr = int(raw_fy.split("-")[0])
+            ay = f"{start_yr + 1}-{str(start_yr + 2)[-2:]}"
+        except: pass
+
+    assessee = ""
+    if name:
+        assessee = name.group(1).strip()
+    else:
+        m = re.search(r'[A-Z]{5}[0-9]{4}[A-Z]\s+XXXX.+?\s+([A-Z][A-Z ]{5,})', text)
+        if m:
+            assessee = m.group(1).strip()
+
+    return {
+        "pan":             pan.group(1).strip() if pan else "",
+        "financial_year":  raw_fy,
+        "assessment_year": ay,
+        "assessee_name":   assessee,
+        "address":         "",
+        "data_updated_on": None,
+    }
+
 def extract_ais_tax_payments(pdf) -> list:
     """
     Extract Part B3 tax payments from AIS PDF.
