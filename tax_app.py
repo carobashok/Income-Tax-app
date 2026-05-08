@@ -43,11 +43,11 @@ h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; }
 /* Summary table styling */
 .stDataFrame { border-radius: 8px; overflow: hidden; }
 
-/* Ensure text is visible on light background */
-.stApp p, .stApp span, .stApp label { color: #333333; }
-[data-testid="stMetricLabel"] { color: #555555 !important; }
-[data-testid="stMetricValue"] { color: #1A1A2E !important; }
-h1, h2, h3, h4 { color: #1A1A2E !important; }
+/* Fix text visibility in main content area only */
+section.main p, section.main span, section.main label { color: #333333; }
+section.main [data-testid="stMetricLabel"] { color: #555555 !important; }
+section.main [data-testid="stMetricValue"] { color: #1A1A2E !important; }
+section.main h1, section.main h2, section.main h3, section.main h4 { color: #1A1A2E !important; }
 </style>
 """, unsafe_allow_html=True)
 
