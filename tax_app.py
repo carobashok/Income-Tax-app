@@ -14,22 +14,23 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
 html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; }
-.stApp { background-color: #F7F6F1; }
 
 .header-bar {
-    background: #1A1A2E; color: #E8E0D0;
+    background: #1A1A2E;
     padding: 1.2rem 2rem; border-radius: 8px; margin-bottom: 1.5rem;
 }
 .header-bar h1 { color: #F5C842; margin: 0; font-size: 1.4rem; }
 .header-bar p  { color: #A0A8C0; margin: 0; font-size: 0.85rem; }
 
 .card {
-    background: #FFFFFF; border: 1px solid #E0DDD5;
+    background: var(--background-color);
+    border: 1px solid rgba(128,128,128,0.2);
     border-radius: 8px; padding: 1.2rem 1.5rem; margin-bottom: 1rem;
 }
 .card-title {
     font-family: 'IBM Plex Mono', monospace; font-size: 0.8rem;
-    color: #888; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.5rem;
+    opacity: 0.6; text-transform: uppercase;
+    letter-spacing: 0.1em; margin-bottom: 0.5rem;
 }
 .summary-row { display: flex; gap: 1rem; margin-bottom: 1rem; }
 .summary-card {
@@ -40,7 +41,6 @@ h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; }
 .summary-card .value { font-size: 1.3rem; font-weight: 600; color: #F5C842;
     font-family: 'IBM Plex Mono', monospace; }
 
-/* Summary table styling */
 .stDataFrame { border-radius: 8px; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
