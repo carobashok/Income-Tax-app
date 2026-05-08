@@ -560,6 +560,10 @@ def extract_ais_tax_payments(pdf) -> list:
             "interest":        0,
             "bsr_code":        bsr or "",
             "date_of_deposit": convert_ais_date(dates[0]),
+            "challan_serial":  "",
+            "remarks":         "",
+            "source":          "AIS",
+        })
 
 def parse_ais_pdf(uploaded_file, password: str = "") -> dict:
     """Parse AIS PDF — extract header and Part B3 tax payments only."""
