@@ -740,8 +740,7 @@ if page == "Upload 26AS":
         h   = parsed["header"]
         fmt = parsed["format_version"]
 
-        st.markdown("---")
-        st.markdown("#### 🔍 Extracted Data Preview")
+        st.markdown("#### Extracted Data Preview")
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("PAN",             h["pan"])
@@ -859,7 +858,7 @@ elif page == "Upload AIS":
         fy = h["financial_year"]
 
         st.markdown("---")
-        st.markdown("#### 🔍 Extracted AIS Data")
+        st.markdown("#### Extracted AIS Data")
 
         c1, c2, c3 = st.columns(3)
         c1.metric("PAN",             h["pan"] or selected_client["pan"])
