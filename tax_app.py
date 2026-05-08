@@ -67,12 +67,14 @@ def ay_exists(client_id: int, assessment_year: str) -> bool:
            .eq("assessment_year", assessment_year).execute())
     return len(res.data) > 0
 
-# ── Summary query ─────────────────────────────────────────────────────────────
-def fetch_summary(client_id: int) -> pd.DataFrame:
+# ── Summary query — deductor-wise ─────────────────────────────────────────────
+def fetch_summary(client_id: int) -> tuple:
     """
-    Pull all years for a client and aggregate into one summary row per AY.
+    Returns:
+      deductor_df — one row per AY per deductor
+      self_tax_df — one row per AY per self-tax entry
+      ay_totals   — one row per AY (for metrics)
     """
-    # Headers
     headers = (supabase.table("form26as_header")
                .select("id, assessment_year, financial_year")
                .eq("client_id", client_id)
@@ -80,51 +82,87 @@ def fetch_summary(client_id: int) -> pd.DataFrame:
                .execute().data or [])
 
     if not headers:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    rows = []
+    ded_rows  = []
+    st_rows   = []
+    ay_totals = []
+
     for h in headers:
         hid = h["id"]
         ay  = h["assessment_year"]
         fy  = h["financial_year"]
 
-        # Deductors for this AY
+        # ── Deductors ──────────────────────────────────────────────────────
         deductors = (supabase.table("form26as_tds_deductor")
-                     .select("deductor_name, total_amount_credited, total_tds_deposited")
+                     .select("deductor_name, tan, total_amount_credited, total_tax_deducted, total_tds_deposited")
                      .eq("header_id", hid)
                      .execute().data or [])
 
-        gross_income  = sum(d["total_amount_credited"] or 0 for d in deductors)
-        total_tds     = sum(d["total_tds_deposited"]   or 0 for d in deductors)
-        employers     = ", ".join(set(d["deductor_name"] for d in deductors if d["deductor_name"]))
+        for d in deductors:
+            amt = d["total_amount_credited"] or 0
+            tds = d["total_tds_deposited"]   or 0
+            ded_rows.append({
+                "AY":                  ay,
+                "FY":                  fy,
+                "Deductor":            d["deductor_name"] or "",
+                "TAN":                 d["tan"] or "",
+                "Amount Credited (₹)": amt,
+                "Tax Deducted (₹)":    d["total_tax_deducted"] or 0,
+                "TDS Deposited (₹)":   tds,
+                "Eff. Rate (%)":       round(tds / amt * 100, 1) if amt > 0 else 0,
+            })
 
-        # Self tax for this AY — split by minor head
+        # ── Self tax ───────────────────────────────────────────────────────
         self_tax = (supabase.table("form26as_self_tax")
-                    .select("minor_head, total_tax")
+                    .select("minor_head, major_head, total_tax, date_of_deposit, bsr_code, challan_serial")
                     .eq("header_id", hid)
                     .execute().data or [])
 
-        advance_tax     = sum(s["total_tax"] or 0 for s in self_tax if s["minor_head"] == "100")
-        self_assess_tax = sum(s["total_tax"] or 0 for s in self_tax if s["minor_head"] == "300")
-        regular_tax     = sum(s["total_tax"] or 0 for s in self_tax if s["minor_head"] == "400")
+        MINOR_HEAD_LABELS = {
+            "100": "Advance Tax",
+            "300": "Self-Assessment Tax",
+            "400": "Regular Assessment Tax",
+            "200": "TDS/TCS",
+            "800": "TDS on Property",
+        }
 
-        total_tax = total_tds + advance_tax + self_assess_tax + regular_tax
-        eff_rate  = round((total_tds / gross_income) * 100, 1) if gross_income > 0 else 0
+        for s in self_tax:
+            mh = s["minor_head"] or ""
+            st_rows.append({
+                "AY":              ay,
+                "FY":              fy,
+                "Type":            MINOR_HEAD_LABELS.get(mh, mh),
+                "Major Head":      s["major_head"] or "",
+                "Minor Head":      mh,
+                "Amount (₹)":      s["total_tax"] or 0,
+                "Date of Deposit": s["date_of_deposit"] or "",
+                "BSR Code":        s["bsr_code"] or "",
+                "Challan No":      s["challan_serial"] or "",
+            })
 
-        rows.append({
-            "AY":                   ay,
-            "FY":                   fy,
-            "Employer(s)":          employers,
-            "Gross Income (₹)":     gross_income,
-            "TDS Deducted (₹)":     total_tds,
-            "Advance Tax (₹)":      advance_tax,
-            "Self-Assess Tax (₹)":  self_assess_tax,
-            "Regular Assess (₹)":   regular_tax,
-            "Total Tax Paid (₹)":   total_tax,
-            "Eff. TDS Rate (%)":    eff_rate,
+        # ── AY totals (for metrics row) ────────────────────────────────────
+        gross  = sum(d["total_amount_credited"] or 0 for d in deductors)
+        tds    = sum(d["total_tds_deposited"]   or 0 for d in deductors)
+        adv    = sum(s["total_tax"] or 0 for s in self_tax if s["minor_head"] == "100")
+        self_  = sum(s["total_tax"] or 0 for s in self_tax if s["minor_head"] == "300")
+        reg    = sum(s["total_tax"] or 0 for s in self_tax if s["minor_head"] == "400")
+        ay_totals.append({
+            "AY":               ay,
+            "FY":               fy,
+            "Gross Income":     gross,
+            "TDS":              tds,
+            "Advance Tax":      adv,
+            "Self-Assess Tax":  self_,
+            "Regular Tax":      reg,
+            "Total Tax":        tds + adv + self_ + reg,
         })
 
-    return pd.DataFrame(rows)
+    return (
+        pd.DataFrame(ded_rows),
+        pd.DataFrame(st_rows),
+        pd.DataFrame(ay_totals),
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PARSER
@@ -477,87 +515,164 @@ elif page == "📋 Year-wise Summary":
         st.stop()
 
     with st.spinner("Loading data..."):
-        df = fetch_summary(selected_client["id"])
+        df_ded, df_st, df_totals = fetch_summary(selected_client["id"])
 
-    if df.empty:
+    if df_ded.empty and df_st.empty:
         st.info(f"No data uploaded yet for {selected_client['name']}. "
                 f"Go to Upload page and add Form 26AS PDFs first.")
         st.stop()
 
-    # ── Totals row ────────────────────────────────────────────────────────
-    totals = pd.DataFrame([{
-        "AY":                   "TOTAL",
-        "FY":                   "",
-        "Employer(s)":          f"{len(df)} years",
-        "Gross Income (₹)":     df["Gross Income (₹)"].sum(),
-        "TDS Deducted (₹)":     df["TDS Deducted (₹)"].sum(),
-        "Advance Tax (₹)":      df["Advance Tax (₹)"].sum(),
-        "Self-Assess Tax (₹)":  df["Self-Assess Tax (₹)"].sum(),
-        "Regular Assess (₹)":   df["Regular Assess (₹)"].sum(),
-        "Total Tax Paid (₹)":   df["Total Tax Paid (₹)"].sum(),
-        "Eff. TDS Rate (%)":    round(
-            df["TDS Deducted (₹)"].sum() / df["Gross Income (₹)"].sum() * 100, 1
-        ) if df["Gross Income (₹)"].sum() > 0 else 0,
-    }])
-    df_display = pd.concat([df, totals], ignore_index=True)
+    st.markdown(f"**{selected_client['name']}** &nbsp;|&nbsp; PAN: `{selected_client['pan']}`")
 
-    # ── Format numbers ────────────────────────────────────────────────────
-    amount_cols = ["Gross Income (₹)", "TDS Deducted (₹)", "Advance Tax (₹)",
-                   "Self-Assess Tax (₹)", "Regular Assess (₹)", "Total Tax Paid (₹)"]
+    # ── Quick metrics ──────────────────────────────────────────────────────
+    if not df_totals.empty:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Years of Data",   len(df_totals))
+        m2.metric("Total Income",    f"₹{df_totals['Gross Income'].sum():,.0f}")
+        m3.metric("Total TDS",       f"₹{df_totals['TDS'].sum():,.0f}")
+        m4.metric("Total Tax Paid",  f"₹{df_totals['Total Tax'].sum():,.0f}")
+
+    st.markdown("---")
+
+    # ── Tabs ──────────────────────────────────────────────────────────────
+    tab1, tab2, tab3 = st.tabs(["🏢 Deductor-wise", "💰 Self / Advance Tax", "📊 AY Totals"])
 
     def fmt_inr(val):
         try:
-            if val == 0: return "—"
-            return f"₹{val:,.0f}"
+            return "—" if val == 0 else f"₹{val:,.0f}"
         except: return val
 
-    for col in amount_cols:
-        df_display[col] = df_display[col].apply(fmt_inr)
-    df_display["Eff. TDS Rate (%)"] = df_display["Eff. TDS Rate (%)"].apply(
-        lambda x: f"{x}%" if x else "—"
-    )
+    # ── Tab 1: Deductor-wise ──────────────────────────────────────────────
+    with tab1:
+        if df_ded.empty:
+            st.info("No deductor data found.")
+        else:
+            # Totals row
+            totals_ded = pd.DataFrame([{
+                "AY":                  "TOTAL",
+                "FY":                  "",
+                "Deductor":            f"{len(df_ded)} entries",
+                "TAN":                 "",
+                "Amount Credited (₹)": df_ded["Amount Credited (₹)"].sum(),
+                "Tax Deducted (₹)":    df_ded["Tax Deducted (₹)"].sum(),
+                "TDS Deposited (₹)":   df_ded["TDS Deposited (₹)"].sum(),
+                "Eff. Rate (%)":       round(
+                    df_ded["TDS Deposited (₹)"].sum() /
+                    df_ded["Amount Credited (₹)"].sum() * 100, 1
+                ) if df_ded["Amount Credited (₹)"].sum() > 0 else 0,
+            }])
+            df_ded_fmt = pd.concat([df_ded, totals_ded], ignore_index=True)
 
-    # ── Display table ─────────────────────────────────────────────────────
-    st.markdown(f"**{selected_client['name']}** &nbsp;|&nbsp; PAN: `{selected_client['pan']}`")
-    st.dataframe(
-        df_display,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "AY":                  st.column_config.TextColumn("Assessment Year", width="small"),
-            "FY":                  st.column_config.TextColumn("Financial Year",  width="small"),
-            "Employer(s)":         st.column_config.TextColumn("Employer(s)",     width="large"),
-            "Gross Income (₹)":    st.column_config.TextColumn("Gross Income",    width="medium"),
-            "TDS Deducted (₹)":    st.column_config.TextColumn("TDS Deducted",    width="medium"),
-            "Advance Tax (₹)":     st.column_config.TextColumn("Advance Tax",     width="medium"),
-            "Self-Assess Tax (₹)": st.column_config.TextColumn("Self-Assess Tax", width="medium"),
-            "Regular Assess (₹)":  st.column_config.TextColumn("Regular Assess",  width="medium"),
-            "Total Tax Paid (₹)":  st.column_config.TextColumn("Total Tax Paid",  width="medium"),
-            "Eff. TDS Rate (%)":   st.column_config.TextColumn("Eff. Rate",       width="small"),
-        }
-    )
+            for col in ["Amount Credited (₹)", "Tax Deducted (₹)", "TDS Deposited (₹)"]:
+                df_ded_fmt[col] = df_ded_fmt[col].apply(fmt_inr)
+            df_ded_fmt["Eff. Rate (%)"] = df_ded_fmt["Eff. Rate (%)"].apply(
+                lambda x: f"{x}%" if x else "—"
+            )
 
-    # ── Quick metrics ──────────────────────────────────────────────────────
+            st.dataframe(
+                df_ded_fmt,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "AY":                  st.column_config.TextColumn("Asst. Year", width="small"),
+                    "FY":                  st.column_config.TextColumn("Fin. Year",  width="small"),
+                    "Deductor":            st.column_config.TextColumn("Deductor",   width="large"),
+                    "TAN":                 st.column_config.TextColumn("TAN",        width="medium"),
+                    "Amount Credited (₹)": st.column_config.TextColumn("Amt Credited", width="medium"),
+                    "Tax Deducted (₹)":    st.column_config.TextColumn("Tax Deducted", width="medium"),
+                    "TDS Deposited (₹)":   st.column_config.TextColumn("TDS Deposited",width="medium"),
+                    "Eff. Rate (%)":       st.column_config.TextColumn("Eff. Rate",  width="small"),
+                }
+            )
+
+    # ── Tab 2: Self / Advance Tax ─────────────────────────────────────────
+    with tab2:
+        if df_st.empty:
+            st.info("No self/advance tax entries found.")
+        else:
+            totals_st = pd.DataFrame([{
+                "AY":          "TOTAL",
+                "FY":          "",
+                "Type":        f"{len(df_st)} entries",
+                "Major Head":  "",
+                "Minor Head":  "",
+                "Amount (₹)":  df_st["Amount (₹)"].sum(),
+                "Date of Deposit": "",
+                "BSR Code":    "",
+                "Challan No":  "",
+            }])
+            df_st_fmt = pd.concat([df_st, totals_st], ignore_index=True)
+            df_st_fmt["Amount (₹)"] = df_st_fmt["Amount (₹)"].apply(fmt_inr)
+
+            st.dataframe(
+                df_st_fmt,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "AY":              st.column_config.TextColumn("Asst. Year", width="small"),
+                    "FY":              st.column_config.TextColumn("Fin. Year",  width="small"),
+                    "Type":            st.column_config.TextColumn("Tax Type",   width="medium"),
+                    "Major Head":      st.column_config.TextColumn("Major Head", width="small"),
+                    "Minor Head":      st.column_config.TextColumn("Minor Head", width="small"),
+                    "Amount (₹)":      st.column_config.TextColumn("Amount",     width="medium"),
+                    "Date of Deposit": st.column_config.TextColumn("Date",       width="medium"),
+                    "BSR Code":        st.column_config.TextColumn("BSR Code",   width="medium"),
+                    "Challan No":      st.column_config.TextColumn("Challan No", width="medium"),
+                }
+            )
+
+    # ── Tab 3: AY Totals ──────────────────────────────────────────────────
+    with tab3:
+        if df_totals.empty:
+            st.info("No data found.")
+        else:
+            totals_ay = pd.DataFrame([{
+                "AY":              "TOTAL",
+                "FY":              "",
+                "Gross Income":    df_totals["Gross Income"].sum(),
+                "TDS":             df_totals["TDS"].sum(),
+                "Advance Tax":     df_totals["Advance Tax"].sum(),
+                "Self-Assess Tax": df_totals["Self-Assess Tax"].sum(),
+                "Regular Tax":     df_totals["Regular Tax"].sum(),
+                "Total Tax":       df_totals["Total Tax"].sum(),
+            }])
+            df_ay_fmt = pd.concat([df_totals, totals_ay], ignore_index=True)
+
+            for col in ["Gross Income","TDS","Advance Tax","Self-Assess Tax","Regular Tax","Total Tax"]:
+                df_ay_fmt[col] = df_ay_fmt[col].apply(fmt_inr)
+
+            st.dataframe(
+                df_ay_fmt,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "AY":              st.column_config.TextColumn("Asst. Year",     width="small"),
+                    "FY":              st.column_config.TextColumn("Fin. Year",       width="small"),
+                    "Gross Income":    st.column_config.TextColumn("Gross Income",    width="medium"),
+                    "TDS":             st.column_config.TextColumn("TDS Deposited",   width="medium"),
+                    "Advance Tax":     st.column_config.TextColumn("Advance Tax",     width="medium"),
+                    "Self-Assess Tax": st.column_config.TextColumn("Self-Assess Tax", width="medium"),
+                    "Regular Tax":     st.column_config.TextColumn("Regular Tax",     width="medium"),
+                    "Total Tax":       st.column_config.TextColumn("Total Tax Paid",  width="medium"),
+                }
+            )
+
+    # ── Export to Excel — all sheets ──────────────────────────────────────
     st.markdown("---")
-    raw = fetch_summary(selected_client["id"])   # unformatted for calculations
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Years of Data",     len(raw))
-    m2.metric("Total Income",      f"₹{raw['Gross Income (₹)'].sum():,.0f}")
-    m3.metric("Total TDS",         f"₹{raw['TDS Deducted (₹)'].sum():,.0f}")
-    m4.metric("Total Tax Paid",    f"₹{raw['Total Tax Paid (₹)'].sum():,.0f}")
-
-    # ── Export to Excel ───────────────────────────────────────────────────
-    st.markdown("---")
-    def to_excel(df_raw: pd.DataFrame) -> bytes:
+    def to_excel_multi() -> bytes:
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            df_raw.to_excel(writer, index=False, sheet_name="26AS Summary")
+            if not df_ded.empty:
+                df_ded.to_excel(writer, index=False, sheet_name="Deductor-wise")
+            if not df_st.empty:
+                df_st.to_excel(writer, index=False, sheet_name="Self-Advance Tax")
+            if not df_totals.empty:
+                df_totals.to_excel(writer, index=False, sheet_name="AY Totals")
         return buf.getvalue()
 
-    excel_data = to_excel(raw)
     st.download_button(
-        label="⬇️ Download as Excel",
-        data=excel_data,
+        label="⬇️ Download as Excel (all sheets)",
+        data=to_excel_multi(),
         file_name=f"Taxalytics_{selected_client['pan']}_summary.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
