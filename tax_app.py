@@ -42,12 +42,6 @@ h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; }
 
 /* Summary table styling */
 .stDataFrame { border-radius: 8px; overflow: hidden; }
-
-/* Fix text visibility in main content area only */
-section.main p, section.main span, section.main label { color: #333333; }
-section.main [data-testid="stMetricLabel"] { color: #555555 !important; }
-section.main [data-testid="stMetricValue"] { color: #1A1A2E !important; }
-section.main h1, section.main h2, section.main h3, section.main h4 { color: #1A1A2E !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -968,12 +962,6 @@ elif page == "Year-wise Summary":
 
     # ── Quick metrics ──────────────────────────────────────────────────────
     if not df_totals.empty:
-        st.markdown("""
-        <style>
-        [data-testid="stMetricLabel"] { color: #333333 !important; }
-        [data-testid="stMetricValue"] { color: #1A1A2E !important; }
-        </style>
-        """, unsafe_allow_html=True)
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Years of Data",   len(df_totals))
         m2.metric("Total Income",    f"₹{df_totals['Gross Income'].sum():,.0f}")
