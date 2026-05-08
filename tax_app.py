@@ -735,6 +735,8 @@ elif page == "Upload AIS":
         st.markdown('</div>', unsafe_allow_html=True)
 
     if uploaded_ais and selected_client:
+        pdf_bytes_debug = uploaded_ais.read()
+        uploaded_ais.seek(0)  # reset for parser
         with st.spinner("Parsing AIS PDF..."):
             try:
                 parsed_ais = parse_ais_pdf(uploaded_ais, password=ais_password)
@@ -748,6 +750,17 @@ elif page == "Upload AIS":
         h  = parsed_ais["header"]
         ay = h["assessment_year"]
         fy = h["financial_year"]
+
+        # ── DEBUG — show raw extraction ───────────────────────────────────
+        with st.expander("🔍 Debug — Raw PDF Content (share this to fix parser)"):
+            with pdfplumber.open(io.BytesIO(pdf_bytes_debug)) as pdf_debug:
+                for i, page in enumerate(pdf_debug.pages):
+                    st.markdown(f"**Page {i+1} Text:**")
+                    st.code(page.extract_text() or "(no text)")
+                    tables = page.extract_tables() or []
+                    for j, table in enumerate(tables):
+                        st.markdown(f"**Page {i+1} Table {j+1}:**")
+                        st.write(pd.DataFrame(table))
 
         st.markdown("---")
         st.markdown("#### 🔍 Extracted AIS Data")
