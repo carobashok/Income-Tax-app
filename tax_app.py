@@ -440,10 +440,9 @@ def extract_ais_tax_payments(pdf) -> list:
     for page in pdf.pages:
         for table in (page.extract_tables() or []):
             for row in table:
-                row_cells = [str(c).strip() if c else "" for c in row]
+                # Replace newlines inside cells — AIS wraps cell text with \n
+                row_cells = [str(c).replace("\n", " ").strip() if c else "" for c in row]
                 row_text  = " ".join(row_cells)
-
-                # Must have a FY like 2023-24
                 fys = FY_RE.findall(row_text)
                 if not fys:
                     continue
@@ -839,7 +838,7 @@ elif page == "Upload AIS":
                 for i, page in enumerate(pdf_debug.pages):
                     for j, table in enumerate(page.extract_tables() or []):
                         for k, row in enumerate(table):
-                            row_cells = [str(c).strip() if c else "" for c in row]
+                            row_cells = [str(c).replace("\n"," ").strip() if c else "" for c in row]
                             row_text  = " ".join(row_cells)
                             fys       = FY_RE_d.findall(row_text)
                             has_major = any(m in row_text.lower() for m in MAJOR_d)
