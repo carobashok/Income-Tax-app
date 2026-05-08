@@ -844,20 +844,6 @@ elif page == "Upload AIS":
         st.markdown('</div>', unsafe_allow_html=True)
 
     if uploaded_ais and selected_client:
-        pdf_bytes_debug = uploaded_ais.read()
-        uploaded_ais.seek(0)  # reset for parser
-        
-        # Pre-decrypt for debug block
-        try:
-            import pikepdf
-            unlocked_debug = io.BytesIO()
-            with pikepdf.open(io.BytesIO(pdf_bytes_debug), password=ais_password) as _p:
-                _p.save(unlocked_debug)
-            unlocked_debug.seek(0)
-            pdf_bytes_debug = unlocked_debug.read()
-        except Exception:
-            pass  # not encrypted or wrong password — debug will show error naturally
-
         with st.spinner("Parsing AIS PDF..."):
             try:
                 parsed_ais = parse_ais_pdf(uploaded_ais, password=ais_password)
@@ -871,45 +857,6 @@ elif page == "Upload AIS":
         h  = parsed_ais["header"]
         ay = h["assessment_year"]
         fy = h["financial_year"]
-
-        # ── DEBUG — show raw extraction ───────────────────────────────────
-        with st.expander("🔍 Debug — Raw PDF Content (share this to fix parser)"):
-            with pdfplumber.open(io.BytesIO(pdf_bytes_debug)) as pdf_debug:
-                for i, page in enumerate(pdf_debug.pages):
-                    st.markdown(f"**Page {i+1} Text:**")
-                    st.code(page.extract_text() or "(no text)")
-                    tables = page.extract_tables() or []
-                    for j, table in enumerate(tables):
-                        st.markdown(f"**Page {i+1} Table {j+1}:**")
-                        st.write(pd.DataFrame(table))
-
-        # ── Parser debug ──────────────────────────────────────────────────
-        with st.expander("🔧 Parser Debug — Row Analysis"):
-            DATE_RE_d = re.compile(r'\d{2}/\d{2}/\d{4}')
-            FY_RE_d   = re.compile(r'20\d{2}-\d{2,4}')
-            MAJOR_d   = ["income tax (other than companies)", "income tax other than companies",
-                         "corporation tax", "income tax"]
-            MINOR_d   = ["advance tax", "self assessment", "self assessment tax",
-                         "regular assessment", "tds/tcs"]
-            with pdfplumber.open(io.BytesIO(pdf_bytes_debug)) as pdf_debug:
-                for i, page in enumerate(pdf_debug.pages):
-                    for j, table in enumerate(page.extract_tables() or []):
-                        for k, row in enumerate(table):
-                            row_cells = [str(c).replace("\n"," ").strip() if c else "" for c in row]
-                            row_text  = " ".join(row_cells)
-                            fys       = FY_RE_d.findall(row_text)
-                            has_major = any(m in row_text.lower() for m in MAJOR_d)
-                            has_minor = any(m in row_text.lower() for m in MINOR_d)
-                            if fys or has_major or has_minor:
-                                st.markdown(f"**P{i+1} T{j+1} R{k+1}:**")
-                                st.json({
-                                    "cells":     row_cells,
-                                    "fys":       fys,
-                                    "has_major": has_major,
-                                    "has_minor": has_minor,
-                                    "amounts":   [c for c in row_cells
-                                                  if re.match(r'^[\d,]+$', c) and len(c) > 1],
-                                })
 
         st.markdown("---")
         st.markdown("#### 🔍 Extracted AIS Data")
