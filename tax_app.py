@@ -737,6 +737,18 @@ elif page == "Upload AIS":
     if uploaded_ais and selected_client:
         pdf_bytes_debug = uploaded_ais.read()
         uploaded_ais.seek(0)  # reset for parser
+        
+        # Pre-decrypt for debug block
+        try:
+            import pikepdf
+            unlocked_debug = io.BytesIO()
+            with pikepdf.open(io.BytesIO(pdf_bytes_debug), password=ais_password) as _p:
+                _p.save(unlocked_debug)
+            unlocked_debug.seek(0)
+            pdf_bytes_debug = unlocked_debug.read()
+        except Exception:
+            pass  # not encrypted or wrong password — debug will show error naturally
+
         with st.spinner("Parsing AIS PDF..."):
             try:
                 parsed_ais = parse_ais_pdf(uploaded_ais, password=ais_password)
