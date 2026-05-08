@@ -351,7 +351,15 @@ def save_to_db(client_id: int, parsed: dict) -> dict:
 # AIS PARSER
 # ══════════════════════════════════════════════════════════════════════════════
 
-def extract_ais_header(text: str) -> dict:
+def convert_ais_date(date_str: str) -> str:
+    """Convert DD/MM/YYYY to YYYY-MM-DD for PostgreSQL."""
+    if not date_str:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.strptime(date_str, "%d/%m/%Y").strftime("%Y-%m-%d")
+    except:
+        return date_str
     """Extract PAN, name, financial year from AIS PDF text."""
     pan  = re.search(r'\b([A-Z]{5}[0-9]{4}[A-Z])\b', text)
     fy   = re.search(r'Financial Year\s+(20\d{2}-\d{2,4})', text)
@@ -504,7 +512,7 @@ def extract_ais_tax_payments(pdf) -> list:
                     "penalty":         0,
                     "interest":        0,
                     "bsr_code":        bsr or "",
-                    "date_of_deposit": dates[0] if dates else None,
+                    "date_of_deposit": convert_ais_date(dates[0]) if dates else None,
                     "challan_serial":  challan_val or "",
                     "remarks":         "",
                     "source":          "AIS",
@@ -551,13 +559,7 @@ def extract_ais_tax_payments(pdf) -> list:
             "penalty":         0,
             "interest":        0,
             "bsr_code":        bsr or "",
-            "date_of_deposit": dates[0],
-            "challan_serial":  "",
-            "remarks":         "",
-            "source":          "AIS",
-        })
-
-    return results
+            "date_of_deposit": convert_ais_date(dates[0]),
 
 def parse_ais_pdf(uploaded_file, password: str = "") -> dict:
     """Parse AIS PDF — extract header and Part B3 tax payments only."""
