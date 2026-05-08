@@ -23,6 +23,7 @@ pyarrow
 duckdb
 supabase
 sqlalchemy
+pikepdf>=8.0.0
 
 # Google
 gspread==6.1.2
