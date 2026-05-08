@@ -113,6 +113,19 @@ def fetch_summary(client_id: int) -> tuple:
                 "Eff. Rate (%)":       round(tds / amt * 100, 1) if amt > 0 else 0,
             })
 
+        # Add placeholder row for years with no deductor data
+        if not deductors:
+            ded_rows.append({
+                "AY":                  ay,
+                "FY":                  fy,
+                "Deductor":            "— No TDS data —",
+                "TAN":                 "",
+                "Amount Credited (₹)": 0,
+                "Tax Deducted (₹)":    0,
+                "TDS Deposited (₹)":   0,
+                "Eff. Rate (%)":       0,
+            })
+
         # ── Self tax ───────────────────────────────────────────────────────
         self_tax = (supabase.table("form26as_self_tax")
                     .select("minor_head, major_head, total_tax, date_of_deposit, bsr_code, challan_serial")
@@ -760,7 +773,7 @@ if page == "Upload 26AS":
                          use_container_width=True, hide_index=True)
 
         if not parsed["deductors"] and not parsed["self_tax"]:
-            st.info("Header extracted but no TDS or tax payment rows found. Verify the PDF.")
+            st.info("ℹ️ No TDS or tax payment data found in this PDF — header will still be saved. Summary will show ₹0 for this year.")
 
         total_tds  = sum(d["total_tds_deposited"] for d in parsed["deductors"])
         total_self = sum(s["total_tax"] for s in parsed["self_tax"])
