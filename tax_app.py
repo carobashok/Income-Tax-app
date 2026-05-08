@@ -14,7 +14,7 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
 html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; }
-.stApp { background-color: #F7F6F1; }
+.stApp { background-color: #FFFFFF; }
 
 .header-bar {
     background: #1A1A2E; color: #E8E0D0;
