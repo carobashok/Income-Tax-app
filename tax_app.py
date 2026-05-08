@@ -390,14 +390,14 @@ with st.sidebar:
                 st.warning("Enter valid PAN (10 chars) and name.")
 
     st.markdown("---")
-    st.markdown("### 🗂 Navigation")
-    page = st.radio("", ["📤 Upload 26AS", "📋 Year-wise Summary"],
+    st.markdown("### Navigation")
+    page = st.radio("", ["Upload 26AS", "Year-wise Summary"],
                     label_visibility="collapsed")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 1 — UPLOAD
 # ══════════════════════════════════════════════════════════════════════════════
-if page == "📤 Upload 26AS":
+if page == "Upload 26AS":
 
     col1, col2 = st.columns([1.2, 1])
     with col1:
@@ -506,7 +506,7 @@ if page == "📤 Upload 26AS":
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 2 — YEAR-WISE SUMMARY
 # ══════════════════════════════════════════════════════════════════════════════
-elif page == "📋 Year-wise Summary":
+elif page == "Year-wise Summary":
 
     st.markdown("#### 📋 Year-wise Tax Summary")
 
@@ -535,7 +535,7 @@ elif page == "📋 Year-wise Summary":
     st.markdown("---")
 
     # ── Tabs ──────────────────────────────────────────────────────────────
-    tab1, tab2, tab3 = st.tabs(["Deductor-wise", "Self / Advance Tax", "AY Totals"])
+    tab1, tab2, tab3 = st.tabs(["Deductor-wise", "Self/Advance Tax", "AY Totals"])
 
     def fmt_inr(val):
         try:
