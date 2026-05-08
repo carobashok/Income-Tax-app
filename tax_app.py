@@ -456,16 +456,39 @@ def extract_ais_tax_payments(pdf) -> list:
                 })
     return results
 
-def parse_ais_pdf(uploaded_file) -> dict:
+def parse_ais_pdf(uploaded_file, password: str = "") -> dict:
     """Parse AIS PDF — extract header and Part B3 tax payments only."""
-    with pdfplumber.open(uploaded_file) as pdf:
-        full_text = "\n".join(p.extract_text() or "" for p in pdf.pages)
-        header    = extract_ais_header(full_text)
-        tax_payments = extract_ais_tax_payments(pdf)
+    import pikepdf, io
+    # Try to unlock if password protected
+    try:
+        pdf_bytes = uploaded_file.read()
+        try:
+            # First try without password
+            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                full_text    = "\n".join(p.extract_text() or "" for p in pdf.pages)
+                header       = extract_ais_header(full_text)
+                tax_payments = extract_ais_tax_payments(pdf)
+        except Exception:
+            # Try with password using pikepdf to decrypt first
+            if not password:
+                raise ValueError("PDF is password protected. Please enter the password.")
+            unlocked = io.BytesIO()
+            with pikepdf.open(io.BytesIO(pdf_bytes), password=password) as pdf_locked:
+                pdf_locked.save(unlocked)
+            unlocked.seek(0)
+            with pdfplumber.open(unlocked) as pdf:
+                full_text    = "\n".join(p.extract_text() or "" for p in pdf.pages)
+                header       = extract_ais_header(full_text)
+                tax_payments = extract_ais_tax_payments(pdf)
+    except ValueError:
+        raise
+    except Exception as e:
+        raise Exception(f"Could not open PDF: {e}")
+
     return {
-        "source":        "AIS",
-        "header":        header,
-        "tax_payments":  tax_payments,
+        "source":       "AIS",
+        "header":       header,
+        "tax_payments": tax_payments,
     }
 
 def save_ais_to_db(client_id: int, parsed: dict, header_id: int) -> int:
@@ -651,6 +674,10 @@ elif page == "Upload AIS":
                     unsafe_allow_html=True)
         uploaded_ais = st.file_uploader("", type=["pdf"], label_visibility="collapsed",
                                         key="ais_uploader")
+        ais_password = st.text_input("PDF Password (if protected)",
+                                     type="password",
+                                     placeholder="e.g. panDDMMYYYY",
+                                     help="AIS password is usually PAN in lowercase + date of birth (DDMMYYYY)")
         st.markdown('</div>', unsafe_allow_html=True)
     with col2:
         st.markdown('<div class="card"><div class="card-title">Instructions</div>',
@@ -666,7 +693,10 @@ elif page == "Upload AIS":
     if uploaded_ais and selected_client:
         with st.spinner("Parsing AIS PDF..."):
             try:
-                parsed_ais = parse_ais_pdf(uploaded_ais)
+                parsed_ais = parse_ais_pdf(uploaded_ais, password=ais_password)
+            except ValueError as e:
+                st.error(f"🔒 {e}")
+                st.stop()
             except Exception as e:
                 st.error(f"Parse error: {e}")
                 st.stop()
