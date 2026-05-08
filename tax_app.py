@@ -348,8 +348,145 @@ def save_to_db(client_id: int, parsed: dict) -> dict:
             "txn_count": txn_count, "self_tax_count": len(parsed["self_tax"])}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# HEADER
+# AIS PARSER
 # ══════════════════════════════════════════════════════════════════════════════
+
+def extract_ais_header(text: str) -> dict:
+    """Extract PAN, name, financial year from AIS PDF text."""
+    pan  = re.search(r'([A-Z]{5}[0-9]{4}[A-Z])', text)
+    fy   = re.search(r'Financial Year\s+(\d{4}-\d{2,4})', text)
+    name = re.search(r'Name of Assessee\s+([A-Z ]+)', text)
+    if not name:
+        name = re.search(r'VENKATARAMAN|([A-Z]{2,}\s[A-Z]{2,}\s[A-Z]{2,})', text)
+
+    raw_fy = fy.group(1).strip() if fy else ""
+    # Derive assessment year from FY (e.g. 2021-22 → 2022-23)
+    ay = ""
+    if raw_fy:
+        try:
+            start_yr = int(raw_fy.split("-")[0])
+            ay = f"{start_yr + 1}-{str(start_yr + 2)[-2:]}"
+        except: pass
+
+    return {
+        "pan":             pan.group(1).strip() if pan else "",
+        "financial_year":  raw_fy,
+        "assessment_year": ay,
+        "assessee_name":   name.group(1).strip() if name and name.lastindex else "",
+        "address":         "",
+        "data_updated_on": None,
+    }
+
+def extract_ais_tax_payments(pdf) -> list:
+    """
+    Extract Part B3 — Tax Payments from AIS PDF.
+    Columns: FY | Major Head | Minor Head | Tax(A) | Surcharge(B) |
+             Ed Cess(C) | Others(D) | Total(A+B+C+D) | BSR | Date | Challan | CIN
+    """
+    results  = []
+    MINOR_HEADS = {"100","102","106","107","300","400","800","200"}
+    MAJOR_HEADS = {"0020","0021","0023","0024","0026","0028","0031","0032","0033"}
+    DATE_RE  = re.compile(r'\d{2}/\d{2}/\d{4}|\d{1,2}-[A-Za-z]{3}-\d{4}')
+    FY_RE    = re.compile(r'20\d{2}-\d{2,4}')
+    in_b3    = False
+
+    def is_decimal(val):
+        clean = val.replace(",", "").strip()
+        return bool(re.match(r'^\d+\.\d{2}$', clean))
+
+    for page in pdf.pages:
+        text = page.extract_text() or ""
+
+        # Detect Part B3 section
+        if "Part B3" in text or "B3-Information relating to payment" in text:
+            in_b3 = True
+        if in_b3 and ("Part B4" in text or "B4-Information" in text):
+            in_b3 = False
+
+        if not in_b3:
+            continue
+
+        for table in (page.extract_tables() or []):
+            for row in table:
+                row = [str(c).strip() if c else "" for c in row]
+
+                major = next((c for c in row if c in MAJOR_HEADS), None)
+                minor = next((c for c in row if c in MINOR_HEADS), None)
+                if not major or not minor:
+                    continue
+
+                dates   = DATE_RE.findall(" ".join(row))
+                if not dates:
+                    continue
+
+                decimals = [float(c.replace(",","")) for c in row
+                            if is_decimal(c.replace(",","").strip()
+                            if "," not in c else c)]
+
+                # Try getting decimals more robustly
+                decimals = []
+                for c in row:
+                    clean = c.replace(",", "").strip()
+                    try:
+                        if re.match(r'^\d+\.\d{2}$', clean):
+                            decimals.append(float(clean))
+                    except: pass
+
+                bsr     = next((c for c in row if re.match(r'^\d{7}$', c.replace(",",""))), None)
+                challan = next(
+                    (c for c in row if re.match(r'^\d{4,6}$', c)
+                     and c != bsr and c not in MAJOR_HEADS
+                     and c not in MINOR_HEADS and not DATE_RE.match(c)), None)
+
+                results.append({
+                    "major_head":      major,
+                    "minor_head":      minor,
+                    "tax":             decimals[0] if len(decimals) > 0 else 0,
+                    "surcharge":       decimals[1] if len(decimals) > 1 else 0,
+                    "education_cess":  decimals[2] if len(decimals) > 2 else 0,
+                    "others":          decimals[3] if len(decimals) > 3 else 0,
+                    "total_tax":       decimals[4] if len(decimals) > 4 else 0,
+                    "penalty":         0,
+                    "interest":        0,
+                    "bsr_code":        bsr or "",
+                    "date_of_deposit": dates[0] if dates else None,
+                    "challan_serial":  challan or "",
+                    "remarks":         "",
+                    "source":          "AIS",
+                })
+    return results
+
+def parse_ais_pdf(uploaded_file) -> dict:
+    """Parse AIS PDF — extract header and Part B3 tax payments only."""
+    with pdfplumber.open(uploaded_file) as pdf:
+        full_text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+        header    = extract_ais_header(full_text)
+        tax_payments = extract_ais_tax_payments(pdf)
+    return {
+        "source":        "AIS",
+        "header":        header,
+        "tax_payments":  tax_payments,
+    }
+
+def save_ais_to_db(client_id: int, parsed: dict, header_id: int) -> int:
+    """Insert AIS tax payments into form26as_self_tax under existing header."""
+    count = 0
+    for row in parsed["tax_payments"]:
+        row["header_id"] = header_id
+        supabase.table("form26as_self_tax").insert(row).execute()
+        count += 1
+    return count
+
+def get_header_id(client_id: int, assessment_year: str):
+    """Fetch existing header_id for a given client + AY."""
+    res = (supabase.table("form26as_header")
+           .select("id")
+           .eq("client_id", client_id)
+           .eq("assessment_year", assessment_year)
+           .execute())
+    return res.data[0]["id"] if res.data else None
+
+
 st.markdown("""
 <div class="header-bar">
     <div>
@@ -391,7 +528,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Navigation")
-    page = st.radio("", ["Upload 26AS", "Year-wise Summary"],
+    page = st.radio("", ["Upload 26AS", "Upload AIS", "Year-wise Summary"],
                     label_visibility="collapsed")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -504,8 +641,127 @@ if page == "Upload 26AS":
         st.warning("Please select or add a client from the sidebar before uploading.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 2 — YEAR-WISE SUMMARY
+# PAGE 2 — UPLOAD AIS
 # ══════════════════════════════════════════════════════════════════════════════
+elif page == "Upload AIS":
+
+    col1, col2 = st.columns([1.2, 1])
+    with col1:
+        st.markdown('<div class="card"><div class="card-title">Upload AIS PDF</div>',
+                    unsafe_allow_html=True)
+        uploaded_ais = st.file_uploader("", type=["pdf"], label_visibility="collapsed",
+                                        key="ais_uploader")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with col2:
+        st.markdown('<div class="card"><div class="card-title">Instructions</div>',
+                    unsafe_allow_html=True)
+        st.markdown("""
+- Download AIS from **Income Tax e-filing portal**
+- Remove PDF password before uploading *(File → Print → Save as PDF)*
+- AIS captures **tax payments (Part B3)** for FY 2023-24 onwards
+- The corresponding 26AS must already be uploaded for the same AY
+        """)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    if uploaded_ais and selected_client:
+        with st.spinner("Parsing AIS PDF..."):
+            try:
+                parsed_ais = parse_ais_pdf(uploaded_ais)
+            except Exception as e:
+                st.error(f"Parse error: {e}")
+                st.stop()
+
+        h  = parsed_ais["header"]
+        ay = h["assessment_year"]
+        fy = h["financial_year"]
+
+        st.markdown("---")
+        st.markdown("#### 🔍 Extracted AIS Data")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("PAN",             h["pan"] or selected_client["pan"])
+        c2.metric("Financial Year",  fy)
+        c3.metric("Assessment Year", ay)
+
+        # Check if 26AS header exists for this AY
+        header_id = get_header_id(selected_client["id"], ay)
+
+        if not header_id:
+            st.warning(
+                f"⚠️ No 26AS uploaded yet for AY {ay}. "
+                f"Please upload the 26AS for this year first, then come back to upload AIS."
+            )
+            st.stop()
+
+        # Check if AIS already uploaded for this AY
+        existing_ais = (supabase.table("form26as_self_tax")
+                        .select("id")
+                        .eq("header_id", header_id)
+                        .eq("source", "AIS")
+                        .execute().data or [])
+        if existing_ais:
+            st.error(f"❌ AIS data already exists for AY {ay}. "
+                     f"Delete existing AIS entries before re-uploading.")
+            st.stop()
+
+        # Preview tax payments
+        if parsed_ais["tax_payments"]:
+            st.markdown("**Part B3 — Tax Payments**")
+
+            MINOR_LABELS = {
+                "100": "Advance Tax", "300": "Self-Assessment Tax",
+                "400": "Regular Assessment Tax", "200": "TDS/TCS",
+            }
+            preview = []
+            for r in parsed_ais["tax_payments"]:
+                preview.append({
+                    "Type":            MINOR_LABELS.get(r["minor_head"], r["minor_head"]),
+                    "Major Head":      r["major_head"],
+                    "Tax (₹)":         r["tax"],
+                    "Total Tax (₹)":   r["total_tax"],
+                    "Date of Deposit": r["date_of_deposit"],
+                    "BSR Code":        r["bsr_code"],
+                    "Challan No":      r["challan_serial"],
+                })
+            st.dataframe(pd.DataFrame(preview), use_container_width=True, hide_index=True)
+
+            total_tax = sum(r["total_tax"] for r in parsed_ais["tax_payments"])
+            st.markdown(f"""
+            <div class="summary-row">
+                <div class="summary-card">
+                    <div class="label">Tax Payment Entries</div>
+                    <div class="value">{len(parsed_ais["tax_payments"])}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Total Tax Paid</div>
+                    <div class="value">₹{total_tax:,.0f}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Linked to AY</div>
+                    <div class="value">{ay}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.info("No tax payment entries found in Part B3 of this AIS. "
+                    "This is normal for years where advance/self-assessment tax was nil.")
+
+        st.markdown("---")
+        if st.button("✅ Confirm & Save AIS Data", type="primary", use_container_width=True):
+            with st.spinner("Saving..."):
+                try:
+                    count = save_ais_to_db(selected_client["id"], parsed_ais, header_id)
+                    st.success(
+                        f"✅ AIS data saved! "
+                        f"{count} tax payment entries linked to AY {ay}."
+                    )
+                except Exception as e:
+                    st.error(f"DB Error: {e}")
+
+    elif uploaded_ais and not selected_client:
+        st.warning("Please select a client from the sidebar before uploading.")
+
+
 elif page == "Year-wise Summary":
 
     st.markdown("#### 📋 Year-wise Tax Summary")
