@@ -535,7 +535,7 @@ elif page == "📋 Year-wise Summary":
     st.markdown("---")
 
     # ── Tabs ──────────────────────────────────────────────────────────────
-    tab1, tab2, tab3 = st.tabs(["🏢 Deductor-wise", "💰 Self / Advance Tax", "📊 AY Totals"])
+    tab1, tab2, tab3 = st.tabs(["Deductor-wise", "Self / Advance Tax", "AY Totals"])
 
     def fmt_inr(val):
         try:
@@ -574,14 +574,14 @@ elif page == "📋 Year-wise Summary":
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "AY":                  st.column_config.TextColumn("Asst. Year", width="small"),
-                    "FY":                  st.column_config.TextColumn("Fin. Year",  width="small"),
-                    "Deductor":            st.column_config.TextColumn("Deductor",   width="large"),
-                    "TAN":                 st.column_config.TextColumn("TAN",        width="medium"),
-                    "Amount Credited (₹)": st.column_config.TextColumn("Amt Credited", width="medium"),
-                    "Tax Deducted (₹)":    st.column_config.TextColumn("Tax Deducted", width="medium"),
-                    "TDS Deposited (₹)":   st.column_config.TextColumn("TDS Deposited",width="medium"),
-                    "Eff. Rate (%)":       st.column_config.TextColumn("Eff. Rate",  width="small"),
+                    "AY":                  st.column_config.TextColumn("AY",           width=90),
+                    "FY":                  st.column_config.TextColumn("FY",           width=90),
+                    "Deductor":            st.column_config.TextColumn("Deductor",     width=300),
+                    "TAN":                 st.column_config.TextColumn("TAN",          width=110),
+                    "Amount Credited (₹)": st.column_config.TextColumn("Amt Credited", width=120),
+                    "Tax Deducted (₹)":    st.column_config.TextColumn("Tax Deducted", width=120),
+                    "TDS Deposited (₹)":   st.column_config.TextColumn("TDS Deposited",width=120),
+                    "Eff. Rate (%)":       st.column_config.TextColumn("Eff. Rate",    width=90),
                 }
             )
 
