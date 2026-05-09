@@ -373,36 +373,6 @@ def convert_ais_date(date_str: str) -> str:
         return datetime.strptime(date_str, "%d/%m/%Y").strftime("%Y-%m-%d")
     except:
         return date_str
-    """Extract PAN, name, financial year from AIS PDF text."""
-    pan  = re.search(r'\b([A-Z]{5}[0-9]{4}[A-Z])\b', text)
-    fy   = re.search(r'Financial Year\s+(20\d{2}-\d{2,4})', text)
-    name = re.search(r'Name of Assessee\s*\n?\s*([A-Z][A-Z ]+)', text)
-
-    raw_fy = fy.group(1).strip() if fy else ""
-    ay = ""
-    if raw_fy:
-        try:
-            start_yr = int(raw_fy.split("-")[0])
-            ay = f"{start_yr + 1}-{str(start_yr + 2)[-2:]}"
-        except: pass
-
-    assessee = ""
-    if name:
-        assessee = name.group(1).strip()
-    else:
-        # fallback — look for name after PAN line
-        m = re.search(r'AEUPA\w+\s+XXXX.+?\s+([A-Z][A-Z ]{5,})', text)
-        if m:
-            assessee = m.group(1).strip()
-
-    return {
-        "pan":             pan.group(1).strip() if pan else "",
-        "financial_year":  raw_fy,
-        "assessment_year": ay,
-        "assessee_name":   assessee,
-        "address":         "",
-        "data_updated_on": None,
-    }
 
 def extract_ais_header(text: str) -> dict:
     """Extract PAN, name, financial year from AIS PDF text."""
@@ -971,7 +941,7 @@ elif page == "Year-wise Summary":
     st.markdown("---")
 
     # ── Tabs ──────────────────────────────────────────────────────────────
-    tab1, tab2, tab3 = st.tabs(["Deductor-wise", "Self/Advance Tax", "AY Totals"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Deductor-wise", "Self/Advance Tax", "AY Totals", "📅 AY Detail View"])
 
     def fmt_inr(val):
         try:
@@ -1092,6 +1062,113 @@ elif page == "Year-wise Summary":
                     "Total Tax":       st.column_config.TextColumn("Total Tax Paid",  width="medium"),
                 }
             )
+
+    # ── Tab 4: AY Detail View ─────────────────────────────────────────────
+    with tab4:
+        if df_totals.empty:
+            st.info("No data found.")
+        else:
+            available_years = df_totals["AY"].tolist()
+            selected_ay = st.selectbox(
+                "Select Assessment Year",
+                available_years,
+                index=len(available_years) - 1,   # default to latest year
+            )
+
+            fy_label = df_totals.loc[df_totals["AY"] == selected_ay, "FY"].values[0]
+            st.markdown(f"### AY {selected_ay} &nbsp;|&nbsp; FY {fy_label}")
+            st.markdown("---")
+
+            # ── Section 1: AY Metrics ──────────────────────────────────────
+            ay_row = df_totals[df_totals["AY"] == selected_ay].iloc[0]
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Gross Income",    f"₹{ay_row['Gross Income']:,.0f}")
+            m2.metric("TDS Deposited",   f"₹{ay_row['TDS']:,.0f}")
+            m3.metric("Advance Tax",     f"₹{ay_row['Advance Tax']:,.0f}")
+            m4.metric("Self-Assess Tax", f"₹{ay_row['Self-Assess Tax']:,.0f}")
+            m5.metric("Total Tax Paid",  f"₹{ay_row['Total Tax']:,.0f}")
+
+            st.markdown("---")
+
+            # ── Section 2: Deductor-wise ───────────────────────────────────
+            st.markdown("#### 🏢 TDS Deductors")
+            df_ded_ay = df_ded[df_ded["AY"] == selected_ay].copy()
+
+            if df_ded_ay.empty or df_ded_ay["Deductor"].iloc[0] == "— No TDS data —":
+                st.info("No TDS deductor data for this year.")
+            else:
+                ded_total = pd.DataFrame([{
+                    "AY":                  selected_ay,
+                    "FY":                  fy_label,
+                    "Deductor":            f"{len(df_ded_ay)} deductors",
+                    "TAN":                 "",
+                    "Amount Credited (₹)": df_ded_ay["Amount Credited (₹)"].sum(),
+                    "Tax Deducted (₹)":    df_ded_ay["Tax Deducted (₹)"].sum(),
+                    "TDS Deposited (₹)":   df_ded_ay["TDS Deposited (₹)"].sum(),
+                    "Eff. Rate (%)":       round(
+                        df_ded_ay["TDS Deposited (₹)"].sum() /
+                        df_ded_ay["Amount Credited (₹)"].sum() * 100, 1
+                    ) if df_ded_ay["Amount Credited (₹)"].sum() > 0 else 0,
+                }])
+                df_ded_ay_fmt = pd.concat([df_ded_ay, ded_total], ignore_index=True)
+
+                for col in ["Amount Credited (₹)", "Tax Deducted (₹)", "TDS Deposited (₹)"]:
+                    df_ded_ay_fmt[col] = df_ded_ay_fmt[col].apply(fmt_inr)
+                df_ded_ay_fmt["Eff. Rate (%)"] = df_ded_ay_fmt["Eff. Rate (%)"].apply(
+                    lambda x: f"{x}%" if x else "—"
+                )
+
+                st.dataframe(
+                    df_ded_ay_fmt.drop(columns=["AY", "FY"]),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Deductor":            st.column_config.TextColumn("Deductor",      width=300),
+                        "TAN":                 st.column_config.TextColumn("TAN",           width=110),
+                        "Amount Credited (₹)": st.column_config.TextColumn("Amt Credited",  width=120),
+                        "Tax Deducted (₹)":    st.column_config.TextColumn("Tax Deducted",  width=120),
+                        "TDS Deposited (₹)":   st.column_config.TextColumn("TDS Deposited", width=120),
+                        "Eff. Rate (%)":       st.column_config.TextColumn("Eff. Rate",     width=90),
+                    }
+                )
+
+            st.markdown("---")
+
+            # ── Section 3: Self / Advance Tax ──────────────────────────────
+            st.markdown("#### 💳 Self / Advance Tax Payments")
+            df_st_ay = df_st[df_st["AY"] == selected_ay].copy()
+
+            if df_st_ay.empty:
+                st.info("No self/advance tax entries for this year.")
+            else:
+                st_total = pd.DataFrame([{
+                    "AY":              selected_ay,
+                    "FY":              fy_label,
+                    "Type":            f"{len(df_st_ay)} entries",
+                    "Major Head":      "",
+                    "Minor Head":      "",
+                    "Amount (₹)":      df_st_ay["Amount (₹)"].sum(),
+                    "Date of Deposit": "",
+                    "BSR Code":        "",
+                    "Challan No":      "",
+                }])
+                df_st_ay_fmt = pd.concat([df_st_ay, st_total], ignore_index=True)
+                df_st_ay_fmt["Amount (₹)"] = df_st_ay_fmt["Amount (₹)"].apply(fmt_inr)
+
+                st.dataframe(
+                    df_st_ay_fmt.drop(columns=["AY", "FY"]),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Type":            st.column_config.TextColumn("Tax Type",   width=180),
+                        "Major Head":      st.column_config.TextColumn("Major Head", width=90),
+                        "Minor Head":      st.column_config.TextColumn("Minor Head", width=90),
+                        "Amount (₹)":      st.column_config.TextColumn("Amount",     width=120),
+                        "Date of Deposit": st.column_config.TextColumn("Date",       width=120),
+                        "BSR Code":        st.column_config.TextColumn("BSR Code",   width=100),
+                        "Challan No":      st.column_config.TextColumn("Challan No", width=90),
+                    }
+                )
 
     # ── Export to Excel — all sheets ──────────────────────────────────────
     st.markdown("---")
