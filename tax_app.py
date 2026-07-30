@@ -1,3 +1,4 @@
+python -m streamlit run tax_app.py
 import streamlit as st
 import pdfplumber
 import pandas as pd
